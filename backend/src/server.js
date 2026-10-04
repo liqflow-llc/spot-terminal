@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import express from 'express';
 import { PublicKey } from '@solana/web3.js';
 import { config } from './config.js';
@@ -10,6 +12,7 @@ import { OrderStore } from './orders/orderStore.js';
 import { OrderService, UserError } from './orders/orderService.js';
 import { Keeper, loadKeeperKeypair } from './orders/keeper.js';
 import { aggregateBook } from './marketdata/aggregate.js';
+import { GeckoStats } from './marketdata/geckoStats.js';
 
 const registry = new TokenRegistry({ heliusRpc: config.rpcUrl, jupApiKey: config.jupApiKey });
 registry.startBackgroundRefresh();
@@ -34,16 +37,52 @@ registry.ensure([...new Set(markets.allSummaries().flatMap(s => [s.baseMint, s.q
     .catch(err => console.error('Token metadata resolve failed:', err.message));
 fills.start();
 keeper.start();
+const gecko = new GeckoStats(markets);
+gecko.start();
 
 // ---------------------------------------------------------------------------
 
-function marketView(s) {
+// 24h high/low for markets being viewed, from GeckoTerminal hourly bars plus our own fills,
+// until our own candles cover a full day. Refreshed in the background; never blocks a request.
+const hiLoCache = new Map(); // market -> { high, low, at }
+function hiLo(address, st) {
+    if (st.coverageHours >= 23) return { high: st.high24h, low: st.low24h };
+    const hit = hiLoCache.get(address);
+    if (!hit || Date.now() - hit.at > 5 * 60 * 1000) {
+        hiLoCache.set(address, { ...(hit || {}), at: Date.now() });
+        const now = Math.floor(Date.now() / 1000);
+        trades.bars(address, '60', now - 86400, now + 3600).then(bars => {
+            if (!bars.length) return;
+            hiLoCache.set(address, {
+                high: Math.max(...bars.map(b => b.high)),
+                low: Math.min(...bars.map(b => b.low)),
+                at: Date.now(),
+            });
+        }).catch(() => {});
+    }
+    const cached = hiLoCache.get(address);
+    return {
+        high: cached?.high != null ? Math.max(cached.high, st.high24h ?? -Infinity) : st.high24h,
+        low: cached?.low != null ? Math.min(cached.low, st.low24h ?? Infinity) : st.low24h,
+    };
+}
+
+function marketView(s, { withHiLo = false } = {}) {
     const base = registry.display(s.baseMint);
     const quote = registry.display(s.quoteMint);
     const st = trades.stats(s.address);
     const mid = s.bestBid && s.bestAsk ? (s.bestBid + s.bestAsk) / 2 : null;
     const last = st.last ?? mid;
-    const volume24hQuote = s.volume24hAtoms != null ? s.volume24hAtoms / 10 ** s.quoteDecimals : null;
+    // Our own counters are exact once they span a day; until then use GeckoTerminal's 24h figures.
+    const ownFullDay = (s.volumeWindowHours ?? 0) >= 23;
+    const gt = gecko.get(s.address);
+    let volume24hQuote = s.volume24hAtoms != null ? s.volume24hAtoms / 10 ** s.quoteDecimals : null;
+    let volume24hUsd = volume24hQuote != null && quote.usdPrice ? volume24hQuote * quote.usdPrice : null;
+    if (!ownFullDay && gt?.volume24hUsd != null) {
+        volume24hUsd = gt.volume24hUsd;
+        volume24hQuote = quote.usdPrice ? gt.volume24hUsd / quote.usdPrice : null;
+    }
+    const ownChange = st.open24h && last && st.coverageHours >= 23 ? last / st.open24h - 1 : null;
     return {
         address: s.address,
         venue: s.venue,
@@ -53,12 +92,11 @@ function marketView(s) {
         bestBid: s.bestBid,
         bestAsk: s.bestAsk,
         last,
-        change24h: st.open24h && last ? last / st.open24h - 1 : null,
-        high24h: st.high24h,
-        low24h: st.low24h,
+        change24h: ownChange ?? gt?.change24h ?? (st.open24h && last ? last / st.open24h - 1 : null),
+        ...(withHiLo ? (({ high, low }) => ({ high24h: high, low24h: low }))(hiLo(s.address, st)) : { high24h: st.high24h, low24h: st.low24h }),
         volume24hQuote,
-        volume24hUsd: volume24hQuote != null && quote.usdPrice ? volume24hQuote * quote.usdPrice : null,
-        volumeWindowHours: s.volumeWindowHours ?? null,
+        volume24hUsd,
+        volumeWindowHours: ownFullDay || gt?.volume24hUsd == null ? (s.volumeWindowHours ?? null) : 24,
         orders: s.bidCount + s.askCount,
     };
 }
@@ -101,7 +139,7 @@ app.get('/api/markets', (req, res) => {
 
 app.get('/api/markets/:address', (req, res) => {
     const s = requireMarket(req, res);
-    if (s) res.json(marketView(s));
+    if (s) res.json(marketView(s, { withHiLo: true }));
 });
 
 app.get('/api/markets/:address/book', (req, res) => {
@@ -151,7 +189,7 @@ app.get('/api/stream', (req, res) => {
     markets.on('update', onUpdate);
     trades.on('trade', onTrade);
     pushBook();
-    const ticker = setInterval(() => send('ticker', marketView(markets.summary(address))), 5000);
+    const ticker = setInterval(() => send('ticker', marketView(markets.summary(address), { withHiLo: true })), 5000);
     const ping = setInterval(() => res.write(': ping\n\n'), 20000);
 
     req.on('close', () => {
@@ -200,7 +238,8 @@ app.get('/api/account', async (req, res) => {
 
 function publicOrder(o) {
     const { claimTx, ...rest } = o;
-    return { ...rest, size: Number(o.baseAtoms) / 10 ** o.baseDecimals };
+    const symbol = `${registry.display(o.baseMint).symbol}/${registry.display(o.quoteMint).symbol}`;
+    return { ...rest, symbol, size: Number(o.baseAtoms) / 10 ** o.baseDecimals };
 }
 
 const NATIVE = 'So11111111111111111111111111111111111111112';
@@ -239,6 +278,13 @@ app.post('/api/orders/withdraw', handle(body => orders.prepareWithdraw(body)));
 app.post('/api/tx/submit', handle(body => orders.submit(body)));
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
+
+// Production: serve the built frontend (vite dev server proxies /api instead during development).
+const dist = path.join(config.root, 'frontend', 'dist');
+if (fs.existsSync(dist)) {
+    app.use(express.static(dist, { maxAge: '1h', index: false }));
+    app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(path.join(dist, 'index.html')));
+}
 
 app.listen(config.port, config.host, () => {
     console.log(`API listening on http://${config.host}:${config.port}`);

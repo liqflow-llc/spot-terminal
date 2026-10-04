@@ -40,11 +40,16 @@ Users never deposit, withdraw or wrap SOL by hand.
 HELIUS_API_KEY=...
 # optional: JUP_API_KEY, PORT (3020), KEEPER_KEYPAIR (default data/keeper.json)
 
-cd backend && npm install && npm start
+./scripts/setup-charting-library.sh          # copies the licensed TradingView bundle in
+cd backend && npm install && npm start       # API on 127.0.0.1:3020
+cd frontend && npm install && npm run dev    # UI on 127.0.0.1:5180 (proxies /api)
 ```
 
-The keeper keypair is generated on first start; fund it with a little SOL (each claim costs
-~0.00001 SOL in fees).
+In production, `npm run build` in `frontend/` and the backend serves `frontend/dist` itself.
+
+The keeper keypair is generated on first start; **fund it with a little SOL** before real use
+(each claim costs ~0.00001 SOL in fees). Without SOL the keeper can't submit claims and filled
+proceeds wait in the market until the user withdraws them from the app.
 
 ## Tests
 
@@ -52,5 +57,7 @@ The keeper keypair is generated on first start; fund it with a little SOL (each 
 solana-test-validator --reset --ledger /tmp/ledger \
   --url https://api.mainnet-beta.solana.com \
   --clone-upgradeable-program MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms
-cd backend && node test/localnet-e2e.mjs
+cd backend && node test/localnet-e2e.mjs   # order/claim/cancel mechanics
+cd frontend && npm run build && cd ../backend && node test/ui-e2e.mjs
+                                            # the real UI in Chrome with a mock wallet
 ```

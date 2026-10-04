@@ -71,7 +71,7 @@ export class TradeStore extends EventEmitter {
     stats(market) {
         const series = this.candles.get(market);
         const last = this.trades.get(market)?.[0]?.price ?? null;
-        if (!series) return { last, open24h: null, high24h: null, low24h: null, volume24hBase: null };
+        if (!series) return { last, open24h: null, high24h: null, low24h: null, volume24hBase: null, coverageHours: 0 };
         const since = Date.now() / 1000 - 86400;
         let open = null, high = -Infinity, low = Infinity, vol = 0, firstTs = Infinity;
         for (const [ts, [o, h, l, , v]] of series) {
@@ -83,6 +83,8 @@ export class TradeStore extends EventEmitter {
         }
         return {
             last,
+            // How much of the last 24h our own candles cover.
+            coverageHours: firstTs === Infinity ? 0 : (Date.now() / 1000 - firstTs) / 3600,
             open24h: open,
             high24h: high === -Infinity ? null : high,
             low24h: low === Infinity ? null : low,

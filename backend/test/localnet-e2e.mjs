@@ -236,6 +236,22 @@ await test('Order that crosses the spread executes immediately and still pays ou
     log('immediately filled buy claimed; base delta', await tokenBalance(maker.publicKey, BASE) - baseBefore);
 });
 
+await test('Cancelling one order keeps another order\'s partial proceeds for its claim', async () => {
+    const quoteBefore = await tokenBalance(maker.publicKey, QUOTE);
+    const a = await placeOrder({ market: mBQ, side: 'sell', price: '5', size: '4' });   // claim ≈ 20 QUOTE
+    const b = await placeOrder({ market: mBQ, side: 'sell', price: '9', size: '1' });
+    await swap(mBQ, { baseIn: false, inAtoms: 10_000_000n }); // fills 2 of A's 4 BASE at 5
+    await sleep(2000);
+    const cancel = await service.prepareCancel({ wallet: maker.publicKey.toBase58(), orderId: b.id });
+    await signAndSubmit(cancel);
+    log('after cancelling B, A\'s partial proceeds still in market:', await seatBalance(mBQ, false), 'quote atoms');
+    await swap(mBQ, { baseIn: false, inAtoms: 10_000_000n }); // fills the rest of A
+    await waitFor(() => store.get(a.id).status === 'claimed', 'claim for A after B was cancelled');
+    const gained = await tokenBalance(maker.publicKey, QUOTE) - quoteBefore;
+    log('wallet +', gained, 'quote atoms in total');
+    assert.ok(gained >= 20_000_000n - 20n, 'A paid out its full 20 QUOTE');
+});
+
 await sleep(1000);
 console.log(failures ? `\n${failures} test(s) FAILED` : '\nAll tests passed');
 fs.rmSync(dataDir, { recursive: true, force: true });

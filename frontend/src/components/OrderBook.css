@@ -1,0 +1,17 @@
+.ob-tick { background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 4px; color: var(--text-2); font: 12px var(--font); height: 24px; padding: 0 4px; }
+.ob-head, .ob-row { display: grid; grid-template-columns: 1.1fr 1fr 1fr; gap: 6px; padding: 0 12px; }
+.ob-head { color: var(--muted); font-size: 11px; height: 26px; align-items: center; flex-shrink: 0; }
+.ob-head span:not(:first-child), .ob-row span:not(:first-child) { text-align: right; }
+.ob-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.ob-side { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+.ob-side.asks { justify-content: flex-end; }
+.ob-row { position: relative; height: 20px; align-items: center; background: none; border: 0; cursor: pointer; font-size: 12px; width: 100%; text-align: left; }
+.ob-row::before { content: ''; position: absolute; top: 1px; bottom: 1px; right: 0; width: var(--depth); pointer-events: none; }
+.ob-row.ask::before { background: var(--ask-bg); }
+.ob-row.bid::before { background: var(--bid-bg); }
+.ob-row:hover { background: var(--panel-2); }
+.ob-row span { position: relative; }
+.ob-mid { display: flex; align-items: baseline; gap: 10px; padding: 6px 12px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.ob-last { font-size: 16px; font-weight: 600; }
+.ob-empty { flex: 1; display: flex; align-items: center; justify-content: center; }
+.ob-foot { font-size: 11px; padding: 6px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }

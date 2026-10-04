@@ -1,0 +1,228 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useWallet } from '@solana/wallet-adapter-react';
+import { useWalletModal } from '@solana/wallet-adapter-react-ui';
+import Modal from './Modal.jsx';
+import { useToast } from './Toasts.jsx';
+import { postJSON } from '../services/api';
+import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
+import { formatAmount, priceDecimals, toInputString } from '../utils/format';
+import './OrderForm.css';
+
+const SOL = 'So11111111111111111111111111111111111111112';
+const SOL_RESERVE = 0.02; // keep some SOL for fees and token-account rent
+const PERCENTS = [25, 50, 75, 100];
+
+export default function OrderForm({ market, book, account, pickedPrice, onPlaced }) {
+  const { publicKey, signAllTransactions } = useWallet();
+  const { setVisible } = useWalletModal();
+  const toast = useToast();
+  const [side, setSide] = useState('buy');
+  const [price, setPrice] = useState('');
+  const [amount, setAmount] = useState('');
+  const [postOnly, setPostOnly] = useState(false);
+  const [busy, setBusy] = useState(null);
+  const [setupPrompt, setSetupPrompt] = useState(null);
+  const seededFor = useRef(null);
+  const priceTouched = useRef(false);
+
+  const base = market?.base, quote = market?.quote;
+  const pDecimals = priceDecimals(market?.last ?? book?.bestBid);
+
+  useEffect(() => {
+    priceTouched.current = false;
+    setAmount('');
+  }, [market?.address]);
+
+  // Default to the best price on your own side of the book (a resting order), once per market
+  // and side, until the user sets a price themselves.
+  useEffect(() => {
+    if (!market || priceTouched.current) return;
+    const key = `${market.address}|${side}`;
+    if (seededFor.current === key) return;
+    const ref = (side === 'buy' ? book?.bestBid : book?.bestAsk) ?? market.last;
+    if (!ref) return;
+    seededFor.current = key;
+    setPrice(toInputString(ref, pDecimals + 2));
+  }, [market, book, side, pDecimals]);
+
+  const editPrice = (v) => {
+    priceTouched.current = true;
+    setPrice(v);
+  };
+
+  useEffect(() => {
+    if (!pickedPrice) return;
+    priceTouched.current = true;
+    setPrice(toInputString(pickedPrice.price, pDecimals + 2));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickedPrice]);
+
+  const p = Number(price), a = Number(amount);
+  const total = p > 0 && a > 0 ? p * a : 0;
+
+  const available = useMemo(() => {
+    if (!account?.wallet || !market) return null;
+    const isBuy = side === 'buy';
+    const mint = isBuy ? quote.mint : base.mint;
+    let bal = isBuy ? account.wallet.quote : account.wallet.base;
+    if (mint === SOL) bal = Math.max(0, bal - SOL_RESERVE);
+    // Funds already sitting in the market from earlier fills count too.
+    bal += (isBuy ? account.inMarket?.quote : account.inMarket?.base) || 0;
+    return bal;
+  }, [account, market, side, base, quote]);
+
+  const setPercent = (pct) => {
+    if (!available) return;
+    if (side === 'buy') {
+      if (!(p > 0)) return;
+      setAmount(toInputString(((available * pct) / 100) / p, base.decimals));
+    } else {
+      setAmount(toInputString((available * pct) / 100, base.decimals));
+    }
+  };
+
+  const setTotal = (value) => {
+    const t = Number(value);
+    if (p > 0 && t >= 0) setAmount(t ? toInputString(t / p, base.decimals) : '');
+  };
+
+  // Warn when a limit order would execute immediately against the book.
+  const crosses = p > 0 && book && (side === 'buy' ? book.bestAsk && p >= book.bestAsk : book.bestBid && p <= book.bestBid);
+  const insufficient = available != null && (side === 'buy' ? total > available + 1e-12 : a > available + 1e-12);
+
+  async function prepare() {
+    return postJSON('/api/orders/prepare', {
+      wallet: publicKey.toBase58(), market: market.address, side, price, size: amount, postOnly,
+    });
+  }
+
+  async function submit() {
+    if (!publicKey) return setVisible(true);
+    if (!(p > 0) || !(a > 0)) return toast({ kind: 'error', title: 'Enter a price and amount' });
+    setBusy('Preparing…');
+    try {
+      let prepared = await prepare();
+      if (prepared.step === 'setup') {
+        setBusy(null);
+        const ok = await new Promise(resolve => setSetupPrompt({ resolve, summary: prepared.summary }));
+        setSetupPrompt(null);
+        if (!ok) return;
+        setBusy('Approve setup in your wallet…');
+        const setup = await signAndSubmit(prepared, signAllTransactions);
+        toast({ kind: 'success', title: 'Instant payouts enabled', link: explorerTx(setup.signature) });
+        setBusy('Preparing…');
+        prepared = await prepare();
+      }
+      setBusy('Approve in your wallet…');
+      const res = await signAndSubmit(prepared, signAllTransactions);
+      toast({
+        kind: 'success',
+        title: `${side === 'buy' ? 'Buy' : 'Sell'} order placed`,
+        message: `${formatAmount(a)} ${base.symbol} at ${price} ${quote.symbol}. Proceeds go to your wallet automatically when it fills.`,
+        link: explorerTx(res.signature),
+      });
+      setAmount('');
+      onPlaced?.();
+    } catch (err) {
+      if (isUserRejection(err)) toast({ title: 'Cancelled in wallet' });
+      else toast({ kind: 'error', title: 'Order not placed', message: err.message });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (!market) return <div className="of-loading"><span className="spinner" /></div>;
+
+  return (
+    <div className="order-form">
+      <div className="of-sides">
+        <button type="button" className={`of-side buy ${side === 'buy' ? 'active' : ''}`} onClick={() => setSide('buy')}>Buy</button>
+        <button type="button" className={`of-side sell ${side === 'sell' ? 'active' : ''}`} onClick={() => setSide('sell')}>Sell</button>
+      </div>
+
+      <div className="of-type">
+        <span className="of-type-active">Limit</span>
+        <label className="of-check" title="Only rest on the book; never execute immediately">
+          <input type="checkbox" checked={postOnly} onChange={e => setPostOnly(e.target.checked)} /> Post-only
+        </label>
+      </div>
+
+      <div className="of-avail">
+        <span className="muted">Available</span>
+        <span className="num">{available == null ? '—' : `${formatAmount(available)} ${side === 'buy' ? quote.symbol : base.symbol}`}</span>
+      </div>
+
+      <Field label="Price" unit={quote.symbol} value={price} onChange={editPrice} />
+      <Field label="Amount" unit={base.symbol} value={amount} onChange={setAmount} />
+      <div className="of-percents">
+        {PERCENTS.map(pct => (
+          <button key={pct} type="button" className="of-pct" onClick={() => setPercent(pct)} disabled={!available}>{pct}%</button>
+        ))}
+      </div>
+      <Field label="Total" unit={quote.symbol} value={total ? toInputString(total, quote.decimals) : ''} onChange={setTotal} />
+
+      {crosses && !postOnly && (
+        <div className="of-note warn">This price crosses the book, so part or all of it will fill immediately.</div>
+      )}
+      {crosses && postOnly && (
+        <div className="of-note warn">Post-only: this price crosses the book and would be rejected.</div>
+      )}
+
+      <button
+        type="button"
+        className={`of-submit ${side}`}
+        onClick={submit}
+        disabled={!!busy || (publicKey && (insufficient || !(p > 0) || !(a > 0)))}
+      >
+        {busy || (!publicKey ? 'Connect wallet' : insufficient ? 'Insufficient balance' : `${side === 'buy' ? 'Buy' : 'Sell'} ${base.symbol}`)}
+      </button>
+
+      <dl className="of-summary">
+        <div><dt>{side === 'buy' ? 'You pay' : 'You sell'}</dt><dd className="num">{side === 'buy' ? `${formatAmount(total)} ${quote.symbol}` : `${formatAmount(a || 0)} ${base.symbol}`}</dd></div>
+        <div><dt>You receive when filled</dt><dd className="num">{side === 'buy' ? `${formatAmount(a || 0)} ${base.symbol}` : `${formatAmount(total)} ${quote.symbol}`}</dd></div>
+        <div><dt>Trading fee</dt><dd>0% <span className="muted">(Manifest)</span></dd></div>
+        <div><dt>Payout</dt><dd>Automatic, straight to your wallet</dd></div>
+      </dl>
+
+      {setupPrompt && (
+        <Modal
+          title="One-time setup: instant payouts"
+          onClose={() => setupPrompt.resolve(false)}
+          actions={(
+            <>
+              <button type="button" className="btn" onClick={() => setupPrompt.resolve(false)}>Not now</button>
+              <button type="button" className="btn primary" onClick={() => setupPrompt.resolve(true)}>Continue</button>
+            </>
+          )}
+        >
+          <p>Before your first order, your wallet creates two small payout accounts. They let your filled orders pay out to your wallet automatically, without you signing again.</p>
+          <ul>
+            <li>You only do this once per wallet.</li>
+            <li>{setupPrompt.summary?.detail?.match(/Refundable deposit [\d.]+ SOL/)?.[0] || 'Refundable SOL deposit'}, returned when the accounts are closed.</li>
+            <li>The payout can only ever send funds to your own wallet.</li>
+          </ul>
+          <p>Next you'll approve this setup, then the order itself.</p>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function Field({ label, unit, value, onChange }) {
+  return (
+    <label className="of-field">
+      <span className="of-field-label">{label}</span>
+      <input
+        className="num"
+        inputMode="decimal"
+        value={value}
+        onChange={e => {
+          const v = e.target.value.replace(',', '.');
+          if (/^\d*\.?\d*$/.test(v)) onChange(v);
+        }}
+        placeholder="0"
+      />
+      <span className="of-field-unit">{unit}</span>
+    </label>
+  );
+}

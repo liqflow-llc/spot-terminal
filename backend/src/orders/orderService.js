@@ -22,7 +22,7 @@ import { getGlobalAddress } from '@bonasa-tech/manifest-sdk';
 import { connection } from '../solana.js';
 import {
     OrderType, ataIx, batchUpdateIx, claimSeatIx, depositIx, encodePrice, isNativeMint,
-    orderEconomics, unwrapSolIx, withdrawIx, wrapSolIxs,
+    orderEconomics, quoteForBase, unwrapSolIx, withdrawIx, wrapSolIxs,
 } from '../venues/manifest/instructions.js';
 import { parseBatchUpdateReturn } from '../venues/manifest/fills.js';
 
@@ -412,7 +412,7 @@ export class OrderService {
                 globals: ctx.globals, cancel: [order.sequenceNumber],
             }));
         }
-        await this.appendWithdrawAll(tx, walletPk, ctx);
+        await this.appendWithdrawAll(tx, walletPk, ctx, { excludeOrderId: order.id });
         const id = crypto.randomUUID();
         this.pending.set(id, { kind: 'cancel', orderId, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight });
         return { step: 'sign', id, transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')], summary: { title: 'Cancel order', detail: 'Cancels the order and returns its funds to your wallet.' } };
@@ -436,7 +436,7 @@ export class OrderService {
      * Append withdrawals of every free balance the wallet will have after the instructions already
      * in `tx` run. Simulates `tx` first so cancelled orders' released funds are included exactly.
      */
-    async appendWithdrawAll(tx, walletPk, ctx) {
+    async appendWithdrawAll(tx, walletPk, ctx, { excludeOrderId = null } = {}) {
         let market = ctx.market;
         if (tx.instructions.length > 2) {
             const v = new VersionedTransaction(tx.compileMessage());
@@ -451,8 +451,11 @@ export class OrderService {
             }
         }
         if (!market.hasSeat(walletPk)) return false;
-        const base = BigInt(market.getWithdrawableBalanceAtoms(walletPk, true).toString());
-        const quote = BigInt(market.getWithdrawableBalanceAtoms(walletPk, false).toString());
+        // Leave behind what other open orders' pre-signed claims will need, or they'd come up short.
+        const reserved = this.claimReservations(walletPk.toBase58(), ctx.marketAddress, market, excludeOrderId);
+        const sub = (a, b) => (a > b ? a - b : 0n);
+        const base = sub(BigInt(market.getWithdrawableBalanceAtoms(walletPk, true).toString()), reserved.base);
+        const quote = sub(BigInt(market.getWithdrawableBalanceAtoms(walletPk, false).toString()), reserved.quote);
         if (base === 0n && quote === 0n) return false;
         tx.add(ataIx({ payer: walletPk, owner: walletPk, mint: ctx.baseMint, tokenProgram: ctx.baseTokenProgram }));
         tx.add(ataIx({ payer: walletPk, owner: walletPk, mint: ctx.quoteMint, tokenProgram: ctx.quoteTokenProgram }));
@@ -462,6 +465,25 @@ export class OrderService {
         return true;
     }
 }
+
+/**
+ * Proceeds already credited to this wallet's other open orders on `marketAddress` (their partial
+ * fills). Those stay in the market so each order's claim can still withdraw its full amount.
+ */
+OrderService.prototype.claimReservations = function claimReservations(wallet, marketAddress, market, excludeOrderId) {
+    const remaining = new Map([...market.bids(), ...market.asks()].map(o => [o.sequenceNumber.toString(), BigInt(o.numBaseAtoms.toString())]));
+    const out = { base: 0n, quote: 0n };
+    for (const o of this.store.active()) {
+        if (o.wallet !== wallet || o.market !== marketAddress || o.id === excludeOrderId) continue;
+        const total = BigInt(o.baseAtoms);
+        const left = o.sequenceNumber && remaining.has(o.sequenceNumber) ? remaining.get(o.sequenceNumber) : 0n;
+        const filled = total > left ? total - left : 0n;
+        if (filled === 0n) continue;
+        if (o.isBid) out.base += filled;
+        else out.quote += left === 0n ? BigInt(o.claimAtoms) : quoteForBase(o.mantissa, o.exponent, filled, false);
+    }
+    return out;
+};
 
 function formatAtoms(atoms, decimals) {
     return (Number(atoms) / 10 ** decimals).toLocaleString('en-US', { maximumFractionDigits: Math.min(decimals, 9) });

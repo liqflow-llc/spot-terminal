@@ -1,0 +1,30 @@
+.order-form { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.of-loading { display: flex; align-items: center; justify-content: center; height: 200px; }
+.of-sides { display: grid; grid-template-columns: 1fr 1fr; background: var(--panel-2); border-radius: var(--radius); padding: 3px; }
+.of-side { height: 32px; border: 0; border-radius: 4px; background: none; font-weight: 700; color: var(--muted); cursor: pointer; }
+.of-side.buy.active { background: var(--bid); color: #fff; }
+.of-side.sell.active { background: var(--ask); color: #fff; }
+.of-type { display: flex; align-items: center; justify-content: space-between; }
+.of-type-active { font-weight: 600; border-bottom: 2px solid var(--accent); padding-bottom: 2px; }
+.of-check { display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 12px; cursor: pointer; }
+.of-check input { accent-color: var(--accent); }
+.of-avail { display: flex; justify-content: space-between; font-size: 12px; }
+.of-field { display: flex; align-items: center; height: 40px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: var(--radius); padding: 0 10px; gap: 8px; }
+.of-field:focus-within { border-color: var(--accent); }
+.of-field-label { color: var(--muted); font-size: 12px; width: 48px; flex-shrink: 0; }
+.of-field input { flex: 1; min-width: 0; background: none; border: 0; outline: none; text-align: right; font-size: 14px; }
+.of-field-unit { color: var(--text-2); font-size: 12px; font-weight: 600; max-width: 70px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.of-percents { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.of-pct { height: 24px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 4px; font-size: 11px; color: var(--text-2); cursor: pointer; }
+.of-pct:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.of-pct:disabled { opacity: .4; cursor: default; }
+.of-note { font-size: 12px; padding: 6px 8px; border-radius: 4px; background: var(--panel-2); }
+.of-note.warn { color: var(--warn); }
+.of-submit { height: 42px; border: 0; border-radius: var(--radius); font-weight: 700; font-size: 14px; color: #fff; cursor: pointer; }
+.of-submit.buy { background: var(--bid); }
+.of-submit.sell { background: var(--ask); }
+.of-submit:disabled { opacity: .55; cursor: not-allowed; }
+.of-summary { margin: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.of-summary div { display: flex; justify-content: space-between; gap: 8px; }
+.of-summary dt { color: var(--muted); }
+.of-summary dd { margin: 0; text-align: right; }

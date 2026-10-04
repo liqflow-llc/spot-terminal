@@ -1,0 +1,11 @@
+.topbar { display: flex; align-items: center; gap: 24px; height: 52px; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.brand { font-weight: 700; font-size: 17px; color: var(--text); letter-spacing: -0.02em; }
+.brand:hover { text-decoration: none; }
+.brand span { color: var(--accent); }
+.topnav { display: flex; gap: 16px; }
+.topnav-item { color: var(--muted); font-weight: 600; }
+.topnav-item.active { color: var(--text); }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.topbar .wallet-adapter-button { height: 34px; padding: 0 14px; font: 600 13px var(--font); border-radius: var(--radius); background: var(--accent); line-height: 34px; }
+.topbar .wallet-adapter-button:not([disabled]):hover { background: #3b7cf0; }
+.topbar .wallet-adapter-button-start-icon { width: 18px; height: 18px; margin-right: 8px; }
