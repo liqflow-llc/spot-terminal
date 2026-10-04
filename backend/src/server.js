@@ -120,6 +120,30 @@ const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '64kb' }));
 
+// ---------- per-IP limits (each of these costs RPC credits) ----------
+// Behind Cloudflare -> nginx, the visitor is in CF-Connecting-IP (nginx passes it through).
+const clientIp = (req) => String(req.headers['cf-connecting-ip'] || req.socket.remoteAddress || 'unknown');
+const buckets = new Map(); // `${name}|${ip}` -> { count, resetAt }
+function rateLimit(name, max, windowMs) {
+    return (req, res, next) => {
+        const key = `${name}|${clientIp(req)}`;
+        const now = Date.now();
+        let b = buckets.get(key);
+        if (!b || now >= b.resetAt) buckets.set(key, (b = { count: 0, resetAt: now + windowMs }));
+        if (++b.count > max) {
+            res.set('Retry-After', String(Math.ceil((b.resetAt - now) / 1000)));
+            return res.status(429).json({ error: 'Too many requests, slow down a little.' });
+        }
+        next();
+    };
+}
+setInterval(() => {
+    const now = Date.now();
+    for (const [k, b] of buckets) if (now >= b.resetAt) buckets.delete(k);
+}, 60_000).unref();
+const streamsPerIp = new Map();
+const MAX_STREAMS_PER_IP = 8;
+
 app.get('/api/config', (req, res) => {
     res.json({ keeper: keeperKeypair.publicKey.toBase58(), resolutions: SUPPORTED_RESOLUTIONS });
 });
@@ -129,8 +153,11 @@ app.get('/api/markets', (req, res) => {
     const limit = Math.min(500, Number(req.query.limit) || 200);
     let list = markets.allSummaries().filter(s => s.bidCount + s.askCount > 0).map(marketView);
     if (q) list = list.filter(m => m.symbol.toLowerCase().includes(q) || m.base.mint === req.query.q || m.address === req.query.q);
-    // Verified pairs with real 24h activity first.
+    // Exact token matches first (so "JUP" finds JUP before JupSOL), then verified pairs with
+    // real 24h activity.
+    const exact = (m) => Number(!!q && (m.base.symbol.toLowerCase() === q || m.base.mint === req.query.q));
     list.sort((a, b) =>
+        (exact(b) - exact(a)) ||
         (Number(b.base.verified && b.quote.verified) - Number(a.base.verified && a.quote.verified)) ||
         ((b.volume24hUsd ?? 0) - (a.volume24hUsd ?? 0)) || (b.orders - a.orders));
     res.set('Cache-Control', 'public, max-age=5');
@@ -154,7 +181,7 @@ app.get('/api/markets/:address/trades', (req, res) => {
     res.json({ trades: trades.recentTrades(req.params.address, Math.min(200, Number(req.query.limit) || 60)) });
 });
 
-app.get('/api/markets/:address/candles', async (req, res) => {
+app.get('/api/markets/:address/candles', rateLimit('candles', 60, 60_000), async (req, res) => {
     if (!requireMarket(req, res)) return;
     const { resolution, from, to } = req.query;
     try {
@@ -169,6 +196,9 @@ app.get('/api/stream', (req, res) => {
     const address = String(req.query.market || '');
     const s = markets.summary(address);
     if (!s) return res.status(404).end();
+    const ip = clientIp(req);
+    if ((streamsPerIp.get(ip) || 0) >= MAX_STREAMS_PER_IP) return res.status(429).end();
+    streamsPerIp.set(ip, (streamsPerIp.get(ip) || 0) + 1);
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
@@ -193,6 +223,8 @@ app.get('/api/stream', (req, res) => {
     const ping = setInterval(() => res.write(': ping\n\n'), 20000);
 
     req.on('close', () => {
+        const left = (streamsPerIp.get(ip) || 1) - 1;
+        if (left > 0) streamsPerIp.set(ip, left); else streamsPerIp.delete(ip);
         markets.off('update', onUpdate);
         trades.off('trade', onTrade);
         clearTimeout(bookTimer);
@@ -204,7 +236,7 @@ app.get('/api/stream', (req, res) => {
 });
 
 // Account view for one wallet on one market: wallet balances, balances held in the market, orders.
-app.get('/api/account', async (req, res) => {
+app.get('/api/account', rateLimit('account', 40, 60_000), async (req, res) => {
     let walletPk;
     try {
         walletPk = new PublicKey(String(req.query.wallet));
@@ -272,10 +304,11 @@ const handle = (fn) => async (req, res) => {
     }
 };
 
-app.post('/api/orders/prepare', handle(body => orders.prepareOrder(body)));
-app.post('/api/orders/cancel', handle(body => orders.prepareCancel(body)));
-app.post('/api/orders/withdraw', handle(body => orders.prepareWithdraw(body)));
-app.post('/api/tx/submit', handle(body => orders.submit(body)));
+const writeLimit = rateLimit('write', 30, 60_000);
+app.post('/api/orders/prepare', writeLimit, handle(body => orders.prepareOrder(body)));
+app.post('/api/orders/cancel', writeLimit, handle(body => orders.prepareCancel(body)));
+app.post('/api/orders/withdraw', writeLimit, handle(body => orders.prepareWithdraw(body)));
+app.post('/api/tx/submit', writeLimit, handle(body => orders.submit(body)));
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
