@@ -4,13 +4,13 @@ import fs from 'fs';
 import path from 'path';
 import { EventEmitter } from 'events';
 import { config } from '../config.js';
+import { geckoFetch } from './gecko.js';
 
 const MAX_TRADES = 300;
 const KEEP_MINUTES = 3 * 24 * 60;
 const SAVE_EVERY_MS = 5 * 60 * 1000;
 const FILE = path.join(config.dataDir, 'candles-1m.json');
 const GT_API = 'https://api.geckoterminal.com/api/v2/networks/solana/pools';
-const GT_MIN_GAP_MS = 2200;      // free tier: 30 requests/minute
 const GT_CACHE_MS = 5 * 60 * 1000;
 
 // TradingView resolution -> [GeckoTerminal timeframe, aggregate, seconds]
@@ -29,8 +29,6 @@ export class TradeStore extends EventEmitter {
         this.trades = new Map();  // market -> newest-first trades
         this.candles = new Map(); // market -> Map(minuteStartSec -> [o, h, l, c, vBase])
         this.gtCache = new Map();
-        this.gtQueue = Promise.resolve();
-        this.gtLast = 0;
         this.load();
         setInterval(() => this.save(), SAVE_EVERY_MS).unref();
     }
@@ -150,27 +148,12 @@ export class TradeStore extends EventEmitter {
         if (hit && Date.now() - hit.at < GT_CACHE_MS) return hit.bars;
 
         const url = `${GT_API}/${market}/ohlcv/${timeframe}?aggregate=${aggregate}&before_timestamp=${Math.floor(before)}&limit=1000&currency=token&token=${s.baseMint}`;
-        const json = await this.gtFetch(url);
+        const json = await geckoFetch(url);
         const bars = (json?.data?.attributes?.ohlcv_list || [])
             .map(([t, o, h, l, c, v]) => ({ time: t * 1000, open: +o, high: +h, low: +l, close: +c, volume: +v }))
             .sort((a, b) => a.time - b.time);
         this.gtCache.set(key, { at: Date.now(), bars });
         return bars;
-    }
-
-    gtFetch(url) {
-        const run = async () => {
-            const wait = this.gtLast + GT_MIN_GAP_MS - Date.now();
-            if (wait > 0) await new Promise(r => setTimeout(r, wait));
-            this.gtLast = Date.now();
-            const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
-            if (res.status === 404) return null;
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return res.json();
-        };
-        const p = this.gtQueue.then(run, run);
-        this.gtQueue = p.catch(() => {});
-        return p;
     }
 
     // ---------- persistence ----------

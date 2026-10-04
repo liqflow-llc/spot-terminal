@@ -52,7 +52,9 @@ const hiLoCache = new Map(); // market -> { high, low, at }
 function hiLo(address, st) {
     if (st.coverageHours >= 23) return { high: st.high24h, low: st.low24h };
     const hit = hiLoCache.get(address);
-    if (!hit || Date.now() - hit.at > 5 * 60 * 1000) {
+    // Refresh every 5 minutes; retry sooner if the last attempt produced nothing.
+    const maxAge = hit?.high != null ? 5 * 60 * 1000 : 30 * 1000;
+    if (!hit || Date.now() - hit.at > maxAge) {
         hiLoCache.set(address, { ...(hit || {}), at: Date.now() });
         const now = Math.floor(Date.now() / 1000);
         trades.bars(address, '60', now - 86400, now + 3600).then(bars => {
