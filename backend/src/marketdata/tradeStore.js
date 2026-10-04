@@ -21,9 +21,11 @@ const RESOLUTIONS = {
 export const SUPPORTED_RESOLUTIONS = Object.keys(RESOLUTIONS);
 
 export class TradeStore extends EventEmitter {
-    constructor(markets) {
+    /** @param minQuote (market) => smallest trade, in quote tokens, worth recording */
+    constructor(markets, minQuote = () => 0) {
         super();
         this.markets = markets; // ManifestMarkets, for decimals
+        this.minQuote = minQuote;
         this.trades = new Map();  // market -> newest-first trades
         this.candles = new Map(); // market -> Map(minuteStartSec -> [o, h, l, c, vBase])
         this.gtCache = new Map();
@@ -41,6 +43,9 @@ export class TradeStore extends EventEmitter {
         const quote = Number(fill.quoteAtoms) / 10 ** s.quoteDecimals;
         const price = quote / size;
         if (!(price > 0)) return;
+        // Dust fills (fractions of a cent hitting stale orders far from the market) would put
+        // absurd wicks on the chart and the 24h high/low.
+        if (quote < this.minQuote(fill.market)) return;
         const trade = { time: fill.time, price, size, side: fill.takerIsBuy ? 'buy' : 'sell', signature: fill.signature };
 
         let list = this.trades.get(fill.market);

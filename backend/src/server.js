@@ -18,7 +18,11 @@ const registry = new TokenRegistry({ heliusRpc: config.rpcUrl, jupApiKey: config
 registry.startBackgroundRefresh();
 
 const markets = new ManifestMarkets();
-const trades = new TradeStore(markets);
+const MIN_TRADE_USD = 0.5;
+const trades = new TradeStore(markets, (market) => {
+    const quoteUsd = registry.cachedPrice(markets.summary(market)?.quoteMint);
+    return quoteUsd ? MIN_TRADE_USD / quoteUsd : 0;
+});
 const fills = new ManifestFillFeed();
 const orderStore = new OrderStore();
 const keeperKeypair = loadKeeperKeypair();
