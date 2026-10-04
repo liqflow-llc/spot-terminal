@@ -1,0 +1,23 @@
+{
+  "name": "spot-aggregator-backend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "@bonasa-tech/manifest-sdk": "^0.2.47",
+    "@noble/hashes": "^2.4.0",
+    "@solana/spl-token": "^0.4.15",
+    "@solana/web3.js": "^1.99.0",
+    "bs58": "^6.0.0",
+    "dotenv": "^18.0.5",
+    "express": "^5.2.1"
+  }
+}

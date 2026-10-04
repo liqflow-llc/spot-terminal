@@ -1,0 +1,242 @@
+// End-to-end test of order placement, automatic claims and cancels against the REAL Manifest
+// program on a local validator (no real funds). Start the validator first:
+//
+//   solana-test-validator --reset --ledger /tmp/ledger \
+//     --url https://api.mainnet-beta.solana.com \
+//     --clone-upgradeable-program MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms
+//
+// then, from backend/: node test/localnet-e2e.mjs
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import assert from 'assert/strict';
+
+const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spot-e2e-'));
+process.env.RPC_URL = process.env.RPC_URL || 'http://127.0.0.1:8899';
+process.env.WS_URL = process.env.WS_URL || 'ws://127.0.0.1:8900';
+process.env.DATA_DIR = dataDir;
+
+const { Keypair, LAMPORTS_PER_SOL, PublicKey, Transaction, sendAndConfirmTransaction } = await import('@solana/web3.js');
+const spl = await import('@solana/spl-token');
+const { Market, createSwapInstruction } = await import('@bonasa-tech/manifest-sdk');
+const { connection } = await import('../src/solana.js');
+const { ManifestMarkets } = await import('../src/venues/manifest/markets.js');
+const { vaultAddress } = await import('../src/venues/manifest/instructions.js');
+const { OrderStore } = await import('../src/orders/orderStore.js');
+const { OrderService } = await import('../src/orders/orderService.js');
+const { Keeper, loadKeeperKeypair } = await import('../src/orders/keeper.js');
+
+const NATIVE = spl.NATIVE_MINT;
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const log = (...a) => console.log('  ', ...a);
+
+async function airdrop(pk, sol) {
+    const sig = await connection.requestAirdrop(pk, sol * LAMPORTS_PER_SOL);
+    await connection.confirmTransaction(sig, 'confirmed');
+}
+
+async function tokenBalance(owner, mint) {
+    if (mint.equals(NATIVE)) return BigInt(await connection.getBalance(owner, 'confirmed'));
+    try {
+        return BigInt((await connection.getTokenAccountBalance(spl.getAssociatedTokenAddressSync(mint, owner), 'confirmed')).value.amount);
+    } catch {
+        return 0n;
+    }
+}
+
+async function waitFor(fn, label, timeoutMs = 30_000) {
+    const end = Date.now() + timeoutMs;
+    while (Date.now() < end) {
+        const v = await fn();
+        if (v) return v;
+        await sleep(500);
+    }
+    throw new Error(`Timed out waiting for: ${label}`);
+}
+
+// ---------- setup ----------
+console.log('Setting up accounts, mints and markets…');
+const maker = Keypair.generate();   // the app user
+const taker = Keypair.generate();   // someone (e.g. Jupiter) trading against the user's orders
+const keeper = loadKeeperKeypair();
+await Promise.all([airdrop(maker.publicKey, 100), airdrop(taker.publicKey, 100), airdrop(keeper.publicKey, 2)]);
+
+const BASE = await spl.createMint(connection, taker, taker.publicKey, null, 6);
+const QUOTE = await spl.createMint(connection, taker, taker.publicKey, null, 6);
+for (const owner of [maker, taker]) {
+    for (const mint of [BASE, QUOTE]) {
+        const ata = await spl.getOrCreateAssociatedTokenAccount(connection, taker, mint, owner.publicKey);
+        await spl.mintTo(connection, taker, mint, ata.address, taker, 1_000_000n * 10n ** 6n);
+    }
+}
+// Taker also needs a wSOL account to receive SOL from swaps.
+await spl.getOrCreateAssociatedTokenAccount(connection, taker, NATIVE, taker.publicKey);
+
+async function createMarket(base, quote) {
+    const { ixs, signers } = await Market.setupIxs(connection, base, quote, taker.publicKey);
+    await sendAndConfirmTransaction(connection, new Transaction().add(...ixs), [taker, ...signers]);
+    return signers[0].publicKey.toBase58();
+}
+const mBQ = await createMarket(BASE, QUOTE);
+const mBS = await createMarket(BASE, NATIVE);
+log('markets', mBQ, '(BASE/QUOTE)', mBS, '(BASE/SOL)');
+
+const markets = new ManifestMarkets();
+await markets.scan();
+const store = new OrderStore();
+const service = new OrderService({ markets, store, keeperPubkey: keeper.publicKey });
+const keeperSvc = new Keeper({ markets, store, keypair: keeper });
+service.onPlaced = (id) => keeperSvc.track(id);
+keeperSvc.start();
+
+/** What a wallet does: sign every transaction it is handed, then send them back. */
+async function signAndSubmit(prepared, signer = maker) {
+    const signed = prepared.transactions.map(b64 => {
+        const tx = Transaction.from(Buffer.from(b64, 'base64'));
+        tx.partialSign(signer);
+        return tx.serialize({ requireAllSignatures: false }).toString('base64');
+    });
+    return service.submit({ id: prepared.id, signed });
+}
+
+async function placeOrder(params) {
+    let prepared = await service.prepareOrder({ wallet: maker.publicKey.toBase58(), ...params });
+    if (prepared.step === 'setup') {
+        log('first order: one-time payout setup (creates nonce accounts)');
+        await signAndSubmit(prepared);
+        prepared = await service.prepareOrder({ wallet: maker.publicKey.toBase58(), ...params });
+    }
+    assert.equal(prepared.step, 'sign');
+    assert.equal(prepared.transactions.length, 2, 'order + claim signed together');
+    const res = await signAndSubmit(prepared);
+    return store.get(res.orderId);
+}
+
+async function swap(market, { baseIn, inAtoms }) {
+    const m = await markets.refresh(market);
+    const base = m.baseMint(), quote = m.quoteMint();
+    const ix = createSwapInstruction({
+        payer: taker.publicKey,
+        market: new PublicKey(market),
+        traderBase: spl.getAssociatedTokenAddressSync(base, taker.publicKey),
+        traderQuote: spl.getAssociatedTokenAddressSync(quote, taker.publicKey),
+        baseVault: vaultAddress(market, base),
+        quoteVault: vaultAddress(market, quote),
+        tokenProgramBase: spl.TOKEN_PROGRAM_ID,
+    }, { params: { inAtoms: inAtoms.toString(), outAtoms: '0', isBaseIn: baseIn, isExactIn: true } });
+    const pre = quote.equals(NATIVE) && !baseIn ? [
+        // Fund taker's wSOL for SOL-in swaps.
+        (await import('@solana/web3.js')).SystemProgram.transfer({ fromPubkey: taker.publicKey, toPubkey: spl.getAssociatedTokenAddressSync(NATIVE, taker.publicKey), lamports: inAtoms }),
+        spl.createSyncNativeInstruction(spl.getAssociatedTokenAddressSync(NATIVE, taker.publicKey)),
+    ] : [];
+    await sendAndConfirmTransaction(connection, new Transaction().add(...pre, ix), [taker]);
+}
+
+const seatBalance = async (market, isBase) => {
+    const m = await markets.refresh(market);
+    return m.hasSeat(maker.publicKey) ? BigInt(m.getWithdrawableBalanceAtoms(maker.publicKey, isBase).toString()) : 0n;
+};
+
+let failures = 0;
+async function test(name, fn) {
+    console.log(`\n▶ ${name}`);
+    try {
+        await fn();
+        console.log('  ✔ passed');
+    } catch (err) {
+        failures++;
+        console.log('  ✘ FAILED:', err.message);
+    }
+}
+
+// ---------- tests ----------
+
+await test('Sell order fully filled → proceeds land in wallet automatically', async () => {
+    const quoteBefore = await tokenBalance(maker.publicKey, QUOTE);
+    const baseBefore = await tokenBalance(maker.publicKey, BASE);
+    const order = await placeOrder({ market: mBQ, side: 'sell', price: '2.5', size: '10' });
+    log('order', order.status, 'seq', order.sequenceNumber, 'claim', order.claimAtoms, 'quote atoms');
+    assert.equal(order.status, 'open');
+    assert.equal(baseBefore - await tokenBalance(maker.publicKey, BASE), 10_000_000n, 'exactly 10 BASE left the wallet');
+
+    await swap(mBQ, { baseIn: false, inAtoms: 30_000_000n }); // taker buys with 30 QUOTE, more than enough
+    const claimed = await waitFor(() => store.get(order.id).status === 'claimed' && store.get(order.id), 'keeper claim');
+    const gained = await tokenBalance(maker.publicKey, QUOTE) - quoteBefore;
+    log('claim tx', claimed.claimSignature.slice(0, 16) + '…', 'wallet +', gained, 'quote atoms');
+    assert.equal(gained, 25_000_000n - 10n, '25 QUOTE (minus 10-atom rounding slack) returned to wallet');
+    log('dust left in market:', await seatBalance(mBQ, false), 'quote atoms');
+});
+
+await test('Buy order paid in SOL, fully filled → base tokens land in wallet', async () => {
+    const baseBefore = await tokenBalance(maker.publicKey, BASE);
+    const order = await placeOrder({ market: mBS, side: 'buy', price: '0.5', size: '4' });
+    assert.equal(order.status, 'open');
+    log('locked', order.lockAtoms, 'lamports (2 SOL)');
+    await swap(mBS, { baseIn: true, inAtoms: 5_000_000n }); // taker sells 5 BASE
+    await waitFor(() => store.get(order.id).status === 'claimed', 'keeper claim');
+    const gained = await tokenBalance(maker.publicKey, BASE) - baseBefore;
+    log('wallet +', gained, 'base atoms');
+    assert.equal(gained, 4_000_000n, 'exactly 4 BASE returned to wallet');
+});
+
+await test('Sell for SOL, fully filled → native SOL lands in wallet (wSOL unwrapped)', async () => {
+    const order = await placeOrder({ market: mBS, side: 'sell', price: '0.4', size: '2' });
+    const solBefore = await tokenBalance(maker.publicKey, NATIVE);
+    await swap(mBS, { baseIn: false, inAtoms: 1_000_000_000n }); // taker buys with 1 SOL
+    const claimed = await waitFor(() => store.get(order.id).status === 'claimed' && store.get(order.id), 'keeper claim');
+    const gained = await tokenBalance(maker.publicKey, NATIVE) - solBefore;
+    log('wallet +', gained, 'lamports native SOL; claim', claimed.claimSignature.slice(0, 16) + '…');
+    // The keeper paid the fee, so the wallet gains the full 0.8 SOL minus the 10-atom slack.
+    assert.equal(gained, 800_000_000n - 10n, '0.8 SOL returned as native SOL');
+    const wsol = await connection.getAccountInfo(spl.getAssociatedTokenAddressSync(NATIVE, maker.publicKey));
+    assert.equal(wsol, null, 'no wSOL account left behind');
+});
+
+await test('Partially filled then cancelled → everything back in wallet, stale claim is void', async () => {
+    const baseBefore = await tokenBalance(maker.publicKey, BASE);
+    const quoteBefore = await tokenBalance(maker.publicKey, QUOTE);
+    const order = await placeOrder({ market: mBQ, side: 'sell', price: '3', size: '10' });
+    await swap(mBQ, { baseIn: false, inAtoms: 12_000_000n }); // buys 4 BASE
+    await sleep(3000);
+    assert.equal(store.get(order.id).status, 'open', 'partial fill does not trigger the claim');
+
+    const cancel = await service.prepareCancel({ wallet: maker.publicKey.toBase58(), orderId: order.id });
+    await signAndSubmit(cancel);
+    assert.equal(store.get(order.id).status, 'cancelled');
+    const baseNet = await tokenBalance(maker.publicKey, BASE) - baseBefore;
+    const quoteNet = await tokenBalance(maker.publicKey, QUOTE) - quoteBefore;
+    log('net wallet change: base', baseNet, 'quote', quoteNet);
+    assert.equal(baseNet, -4_000_000n, 'only the 4 BASE that sold are gone');
+    // 12 QUOTE from the partial fill, plus any rounding dust earlier tests left in this market
+    // (cancel sweeps everything the wallet has there).
+    assert.ok(quoteNet >= 12_000_000n && quoteNet <= 12_000_100n, `12 QUOTE received (got ${quoteNet})`);
+    assert.equal(await seatBalance(mBQ, true), 0n);
+    assert.equal(await seatBalance(mBQ, false), 0n);
+
+    // The unused pre-signed claim must no longer be valid (nonce advanced by the cancel).
+    const stale = Transaction.from(Buffer.from(order.claimTx, 'base64'));
+    stale.partialSign(keeper);
+    await assert.rejects(connection.sendRawTransaction(stale.serialize()), 'stale claim rejected');
+    log('stale claim rejected as expected');
+});
+
+await test('Later orders are a single approval (nonce accounts are reused)', async () => {
+    const prepared = await service.prepareOrder({ wallet: maker.publicKey.toBase58(), market: mBQ, side: 'buy', price: '1', size: '1' });
+    assert.equal(prepared.step, 'sign', 'no setup step');
+    log('free nonce accounts:', store.noncesFor(maker.publicKey.toBase58()).length);
+});
+
+await test('Order that crosses the spread executes immediately and still pays out', async () => {
+    // An ask rests at 2.0; the user's buy at 2.2 takes it in full on arrival.
+    const restingAsk = await service.prepareOrder({ wallet: maker.publicKey.toBase58(), market: mBQ, side: 'sell', price: '2', size: '3' });
+    await signAndSubmit(restingAsk); // maker's own ask as liquidity (self-trade is allowed on Manifest)
+    const baseBefore = await tokenBalance(maker.publicKey, BASE);
+    const order = await placeOrder({ market: mBQ, side: 'buy', price: '2.2', size: '3' });
+    await waitFor(() => store.get(order.id).status === 'claimed', 'claim of immediately-filled order');
+    log('immediately filled buy claimed; base delta', await tokenBalance(maker.publicKey, BASE) - baseBefore);
+});
+
+await sleep(1000);
+console.log(failures ? `\n${failures} test(s) FAILED` : '\nAll tests passed');
+fs.rmSync(dataDir, { recursive: true, force: true });
+process.exit(failures ? 1 : 0);

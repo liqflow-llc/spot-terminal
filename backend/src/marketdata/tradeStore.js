@@ -1,0 +1,197 @@
+// Recent trades and 1-minute candles per market, built from the live fill feed.
+// Older chart history is backfilled from GeckoTerminal (which indexes Manifest markets).
+import fs from 'fs';
+import path from 'path';
+import { EventEmitter } from 'events';
+import { config } from '../config.js';
+
+const MAX_TRADES = 300;
+const KEEP_MINUTES = 3 * 24 * 60;
+const SAVE_EVERY_MS = 5 * 60 * 1000;
+const FILE = path.join(config.dataDir, 'candles-1m.json');
+const GT_API = 'https://api.geckoterminal.com/api/v2/networks/solana/pools';
+const GT_MIN_GAP_MS = 2200;      // free tier: 30 requests/minute
+const GT_CACHE_MS = 5 * 60 * 1000;
+
+// TradingView resolution -> [GeckoTerminal timeframe, aggregate, seconds]
+const RESOLUTIONS = {
+    1: ['minute', 1, 60], 5: ['minute', 5, 300], 15: ['minute', 15, 900],
+    60: ['hour', 1, 3600], 240: ['hour', 4, 14400], '1D': ['day', 1, 86400],
+};
+export const SUPPORTED_RESOLUTIONS = Object.keys(RESOLUTIONS);
+
+export class TradeStore extends EventEmitter {
+    constructor(markets) {
+        super();
+        this.markets = markets; // ManifestMarkets, for decimals
+        this.trades = new Map();  // market -> newest-first trades
+        this.candles = new Map(); // market -> Map(minuteStartSec -> [o, h, l, c, vBase])
+        this.gtCache = new Map();
+        this.gtQueue = Promise.resolve();
+        this.gtLast = 0;
+        this.load();
+        setInterval(() => this.save(), SAVE_EVERY_MS).unref();
+    }
+
+    /** Record a fill from ManifestFillFeed. */
+    addFill(fill) {
+        const s = this.markets.summary(fill.market);
+        if (!s || fill.baseAtoms === 0n) return;
+        const size = Number(fill.baseAtoms) / 10 ** s.baseDecimals;
+        const quote = Number(fill.quoteAtoms) / 10 ** s.quoteDecimals;
+        const price = quote / size;
+        if (!(price > 0)) return;
+        const trade = { time: fill.time, price, size, side: fill.takerIsBuy ? 'buy' : 'sell', signature: fill.signature };
+
+        let list = this.trades.get(fill.market);
+        if (!list) this.trades.set(fill.market, (list = []));
+        list.unshift(trade);
+        if (list.length > MAX_TRADES) list.length = MAX_TRADES;
+
+        const minute = Math.floor(fill.time / 60000) * 60;
+        let series = this.candles.get(fill.market);
+        if (!series) this.candles.set(fill.market, (series = new Map()));
+        const c = series.get(minute);
+        if (c) {
+            c[1] = Math.max(c[1], price);
+            c[2] = Math.min(c[2], price);
+            c[3] = price;
+            c[4] += size;
+        } else {
+            series.set(minute, [price, price, price, price, size]);
+        }
+        this.emit('trade', fill.market, trade);
+    }
+
+    recentTrades(market, limit = 50) {
+        return (this.trades.get(market) || []).slice(0, limit);
+    }
+
+    /** Last trade price and 24h stats from our own data (null fields when we have none). */
+    stats(market) {
+        const series = this.candles.get(market);
+        const last = this.trades.get(market)?.[0]?.price ?? null;
+        if (!series) return { last, open24h: null, high24h: null, low24h: null, volume24hBase: null };
+        const since = Date.now() / 1000 - 86400;
+        let open = null, high = -Infinity, low = Infinity, vol = 0, firstTs = Infinity;
+        for (const [ts, [o, h, l, , v]] of series) {
+            if (ts < since) continue;
+            if (ts < firstTs) { firstTs = ts; open = o; }
+            high = Math.max(high, h);
+            low = Math.min(low, l);
+            vol += v;
+        }
+        return {
+            last,
+            open24h: open,
+            high24h: high === -Infinity ? null : high,
+            low24h: low === Infinity ? null : low,
+            volume24hBase: vol,
+        };
+    }
+
+    // ---------- candles for the chart ----------
+
+    /** Bars ({ time: ms, open, high, low, close, volume }) for [from, to) seconds, oldest first. */
+    async bars(market, resolution, from, to) {
+        const spec = RESOLUTIONS[resolution];
+        if (!spec) throw new Error(`Unsupported resolution ${resolution}`);
+        const [, , seconds] = spec;
+        const own = this.ownBars(market, seconds, from, to);
+        const ownStart = own.length ? own[0].time / 1000 : Infinity;
+        // Use GeckoTerminal only for the period before our own data begins.
+        let history = [];
+        if (from < ownStart) {
+            try {
+                history = (await this.geckoBars(market, resolution, Math.min(to, ownStart)))
+                    .filter(b => b.time / 1000 >= from && b.time / 1000 < Math.min(to, ownStart));
+            } catch (err) {
+                console.error(`GeckoTerminal OHLCV failed for ${market}:`, err.message);
+            }
+        }
+        return [...history, ...own];
+    }
+
+    ownBars(market, seconds, from, to) {
+        const series = this.candles.get(market);
+        if (!series) return [];
+        const buckets = new Map();
+        for (const [ts, [o, h, l, c, v]] of [...series].sort((a, b) => a[0] - b[0])) {
+            if (ts < from || ts >= to) continue;
+            const b = Math.floor(ts / seconds) * seconds;
+            const bar = buckets.get(b);
+            if (bar) {
+                bar.high = Math.max(bar.high, h);
+                bar.low = Math.min(bar.low, l);
+                bar.close = c;
+                bar.volume += v;
+            } else {
+                buckets.set(b, { time: b * 1000, open: o, high: h, low: l, close: c, volume: v });
+            }
+        }
+        return [...buckets.values()];
+    }
+
+    async geckoBars(market, resolution, before) {
+        const [timeframe, aggregate] = RESOLUTIONS[resolution];
+        const s = this.markets.summary(market);
+        if (!s) return [];
+        // Cache by market+resolution and a coarse "before" bucket so scrolling back reuses pages.
+        const bucket = Math.floor(before / 3600);
+        const key = `${market}|${resolution}|${bucket}`;
+        const hit = this.gtCache.get(key);
+        if (hit && Date.now() - hit.at < GT_CACHE_MS) return hit.bars;
+
+        const url = `${GT_API}/${market}/ohlcv/${timeframe}?aggregate=${aggregate}&before_timestamp=${Math.floor(before)}&limit=1000&currency=token&token=${s.baseMint}`;
+        const json = await this.gtFetch(url);
+        const bars = (json?.data?.attributes?.ohlcv_list || [])
+            .map(([t, o, h, l, c, v]) => ({ time: t * 1000, open: +o, high: +h, low: +l, close: +c, volume: +v }))
+            .sort((a, b) => a.time - b.time);
+        this.gtCache.set(key, { at: Date.now(), bars });
+        return bars;
+    }
+
+    gtFetch(url) {
+        const run = async () => {
+            const wait = this.gtLast + GT_MIN_GAP_MS - Date.now();
+            if (wait > 0) await new Promise(r => setTimeout(r, wait));
+            this.gtLast = Date.now();
+            const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
+            if (res.status === 404) return null;
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.json();
+        };
+        const p = this.gtQueue.then(run, run);
+        this.gtQueue = p.catch(() => {});
+        return p;
+    }
+
+    // ---------- persistence ----------
+
+    load() {
+        try {
+            const saved = JSON.parse(fs.readFileSync(FILE, 'utf8'));
+            for (const [market, rows] of Object.entries(saved)) this.candles.set(market, new Map(rows));
+            console.log(`TradeStore: loaded 1m candles for ${this.candles.size} markets`);
+        } catch {
+            // First run.
+        }
+    }
+
+    save() {
+        const cutoff = Date.now() / 1000 - KEEP_MINUTES * 60;
+        const out = {};
+        for (const [market, series] of this.candles) {
+            for (const ts of series.keys()) if (ts < cutoff) series.delete(ts);
+            if (series.size) out[market] = [...series];
+            else this.candles.delete(market);
+        }
+        try {
+            fs.mkdirSync(config.dataDir, { recursive: true });
+            fs.writeFileSync(`${FILE}.tmp`, JSON.stringify(out));
+            fs.renameSync(`${FILE}.tmp`, FILE);
+        } catch (err) {
+            console.error('TradeStore: save failed:', err.message);
+        }
+    }
+}
