@@ -15,3 +15,7 @@
 .ob-last { font-size: 16px; font-weight: 600; }
 .ob-empty { flex: 1; display: flex; align-items: center; justify-content: center; }
 .ob-foot { font-size: 11px; padding: 6px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
+
+.venue-badge { display: inline-block; margin-left: 4px; padding: 0 3px; border-radius: 3px; font-size: 9px; font-weight: 700; line-height: 13px; vertical-align: 1px; font-family: var(--font); }
+.venue-badge.archer { background: rgba(245, 197, 66, 0.16); color: #f5c542; }
+.ob-foot { line-height: 1.35; }

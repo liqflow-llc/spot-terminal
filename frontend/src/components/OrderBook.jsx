@@ -57,6 +57,8 @@ export default function OrderBook({ book, market, onPick }) {
   }, [book, tick, rows]);
 
   const sourceCount = book?.sources?.length || 0;
+  const hasArcher = book?.sources?.some(s => s.venue === 'archer' && s.market) && [...(book?.bids || []), ...(book?.asks || [])].some(l => Object.keys(l[2]).some(id => id.startsWith('archer:')));
+  const venueOf = (id) => (id.startsWith('archer:') ? 'Archer' : 'Manifest');
   const spread = book?.bestAsk && book?.bestBid ? book.bestAsk - book.bestBid : null;
 
   const row = (l, side) => (
@@ -66,9 +68,12 @@ export default function OrderBook({ book, market, onPick }) {
       className={`ob-row ${side}`}
       style={{ '--depth': `${maxCum ? (l.cum / maxCum) * 100 : 0}%` }}
       onClick={() => onPick?.(l.price)}
-      title={sourceCount > 1 ? Object.entries(l.sources).map(([s, v]) => `${shortAddress(s.split(':')[1])}: ${formatAmount(v)}`).join('\n') : undefined}
+      title={sourceCount > 1 ? Object.entries(l.sources).map(([s, v]) => `${venueOf(s)} ${shortAddress(s.split(':')[1])}: ${formatAmount(v)}`).join('\n') : undefined}
     >
-      <span className={`num ${side}`}>{formatPrice(l.price, decimals)}</span>
+      <span className={`num ${side}`}>
+        {formatPrice(l.price, decimals)}
+        {Object.keys(l.sources).some(id => id.startsWith('archer:')) && <span className="venue-badge archer" aria-label="Includes Archer liquidity">A</span>}
+      </span>
       <span className="num">{formatAmount(l.size)}</span>
       <span className="num muted">{formatAmount(l.price * l.size)}</span>
     </button>
@@ -105,7 +110,9 @@ export default function OrderBook({ book, market, onPick }) {
       </div>
       {sourceCount > 1 && (
         <div className="ob-foot muted" title={book.sources.map(s => `${s.venue} ${s.market}${s.inverted ? ' (inverted)' : ''}`).join('\n')}>
-          Aggregated from {sourceCount} Manifest markets for this pair
+          {hasArcher
+            ? <><span className="venue-badge archer">A</span> = Archer depth: market orders can take it (via Jupiter); limit orders rest on Manifest</>
+            : `Aggregated from ${sourceCount} Manifest markets for this pair`}
         </div>
       )}
     </>

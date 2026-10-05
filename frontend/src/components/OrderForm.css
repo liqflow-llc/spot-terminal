@@ -5,7 +5,14 @@
 .of-side.buy.active { background: var(--bid); color: #fff; }
 .of-side.sell.active { background: var(--ask); color: #fff; }
 .of-type { display: flex; align-items: center; justify-content: space-between; }
-.of-type-active { font-weight: 600; border-bottom: 2px solid var(--accent); padding-bottom: 2px; }
+.of-type-tabs { display: flex; gap: 14px; }
+.of-type-tab { background: none; border: 0; padding: 0 0 2px; font-weight: 600; color: var(--muted); border-bottom: 2px solid transparent; cursor: pointer; }
+.of-type-tab:hover { color: var(--text-2); }
+.of-type-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.of-slippage { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.of-slippage-options { display: grid; grid-template-columns: repeat(4, 44px); gap: 4px; }
+.of-pct.active { border-color: var(--accent); color: var(--text); }
+.warn-text { color: var(--warn); }
 .of-check { display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 12px; cursor: pointer; }
 .of-check input { accent-color: var(--accent); }
 .of-avail { display: flex; justify-content: space-between; font-size: 12px; }

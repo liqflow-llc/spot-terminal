@@ -214,13 +214,21 @@ export class TokenRegistry {
     // ---------- Jupiter ----------
 
     /** Serialize calls to api.jup.ag to respect its per-second limit. */
-    jupFetch(pathAndQuery) {
+    jupFetch(pathAndQuery, { method = 'GET', body } = {}) {
         const run = async () => {
             const wait = this.jupLastCall + this.jupMinGapMs - Date.now();
             if (wait > 0) await new Promise(r => setTimeout(r, wait));
             this.jupLastCall = Date.now();
-            const res = await fetch(`${JUP_API}${pathAndQuery}`, { headers: this.jupHeaders, signal: AbortSignal.timeout(20000) });
-            if (!res.ok) throw new Error(`Jupiter API ${res.status} for ${pathAndQuery.split('?')[0]}`);
+            const res = await fetch(`${JUP_API}${pathAndQuery}`, {
+                method,
+                headers: body ? { ...this.jupHeaders, 'Content-Type': 'application/json' } : this.jupHeaders,
+                body: body ? JSON.stringify(body) : undefined,
+                signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) {
+                const detail = await res.text().catch(() => '');
+                throw Object.assign(new Error(`Jupiter API ${res.status} for ${pathAndQuery.split('?')[0]}: ${detail.slice(0, 200)}`), { status: res.status, detail });
+            }
             return res.json();
         };
         const p = this.jupQueue.then(run, run);

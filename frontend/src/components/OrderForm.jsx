@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 import Modal from './Modal.jsx';
+import MarketOrder from './MarketOrder.jsx';
 import { useToast } from './Toasts.jsx';
 import { getJSON, postJSON } from '../services/api';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
@@ -29,6 +30,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
   const { setVisible } = useWalletModal();
   const toast = useToast();
   const [side, setSide] = useState('buy');
+  const [orderType, setOrderType] = useState('limit');
   const [price, setPrice] = useState('');
   const [amount, setAmount] = useState('');
   const [postOnly, setPostOnly] = useState(false);
@@ -120,7 +122,8 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
   };
 
   // Warn when a limit order would execute immediately against the book.
-  const crosses = p > 0 && book && (side === 'buy' ? book.bestAsk && p >= book.bestAsk : book.bestBid && p <= book.bestBid);
+  const bestAsk = book?.manifestBestAsk ?? book?.bestAsk, bestBid = book?.manifestBestBid ?? book?.bestBid;
+  const crosses = p > 0 && book && (side === 'buy' ? bestAsk && p >= bestAsk : bestBid && p <= bestBid);
   const insufficient = available != null && (side === 'buy' ? total > available + 1e-12 : a > available + 1e-12);
 
   async function prepare(acknowledgePriceRisk) {
@@ -198,12 +201,19 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
       </div>
 
       <div className="of-type">
-        <span className="of-type-active">Limit</span>
-        <label className="of-check" title="Only rest on the book; never execute immediately">
-          <input type="checkbox" checked={postOnly} onChange={e => setPostOnly(e.target.checked)} /> Post-only
-        </label>
+        <div className="of-type-tabs" role="tablist">
+          {[['limit', 'Limit'], ['market', 'Market']].map(([id, label]) => (
+            <button key={id} type="button" role="tab" aria-selected={orderType === id} className={`of-type-tab ${orderType === id ? 'active' : ''}`} onClick={() => setOrderType(id)}>{label}</button>
+          ))}
+        </div>
+        {orderType === 'limit' && (
+          <label className="of-check" title="Only rest on the book; never execute immediately">
+            <input type="checkbox" checked={postOnly} onChange={e => setPostOnly(e.target.checked)} /> Post-only
+          </label>
+        )}
       </div>
 
+      {orderType === 'market' ? <MarketOrder market={market} side={side} account={account} onPlaced={onPlaced} /> : (<>
       <div className="of-avail">
         <span className="muted">Available</span>
         <span className="num">{available == null ? '—' : `${formatAmount(available)} ${side === 'buy' ? quote.symbol : base.symbol}`}</span>
@@ -254,6 +264,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
         <div><dt>Trading fee</dt><dd>0% <span className="muted">(Manifest)</span></dd></div>
         <div><dt>Payout</dt><dd>Automatic, straight to your wallet</dd></div>
       </dl>
+      </>)}
       <p className="legal-links">
         <span>By trading you agree to the</span>
         <Link to="/terms">Terms</Link>

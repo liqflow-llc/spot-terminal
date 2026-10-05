@@ -18,6 +18,7 @@ import { ManifestClient, Market } from '@bonasa-tech/manifest-sdk';
 import { connection } from '../../solana.js';
 import { config } from '../../config.js';
 import { inferFills } from './inferFills.js';
+import { isHelius, rpc } from '../../rpcRaw.js';
 
 export const MANIFEST_PROGRAM_ID = new PublicKey('MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms');
 
@@ -42,7 +43,7 @@ export class ManifestMarkets extends EventEmitter {
         this.lastScan = 0;
         this.lastFullScan = 0;
         this.scanSlot = null;           // slot of the last successful scan (for changedSinceSlot)
-        this.useV2 = /helius/i.test(config.rpcUrl);
+        this.useV2 = isHelius;
         this.snapshots = this.loadSnapshots(); // [{ at, volumes: { market: quoteVolumeAtoms } }]
         this.polling = false;
     }
@@ -330,19 +331,4 @@ function aggregate(orders, currentSlot, isBid) {
         }
     }
     return [...byPrice.values()].sort((a, b) => (isBid ? b[0] - a[0] : a[0] - b[0]));
-}
-
-/** A raw JSON-RPC call (for Helius methods web3.js doesn't know). */
-async function rpc(method, params) {
-    const res = await fetch(config.rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-        signal: AbortSignal.timeout(60_000),
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`${res.status} ${text.slice(0, 120)}`);
-    const json = JSON.parse(text);
-    if (json.error) throw new Error(`${method}: ${json.error.message}`);
-    return json.result;
 }

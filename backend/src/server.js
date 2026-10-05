@@ -7,6 +7,7 @@ import { config } from './config.js';
 import { connection } from './solana.js';
 import { TokenRegistry } from './tokens/tokenRegistry.js';
 import { ManifestMarkets } from './venues/manifest/markets.js';
+import { ArcherVenue } from './venues/archer/archer.js';
 import { TradeStore, SUPPORTED_RESOLUTIONS } from './marketdata/tradeStore.js';
 import { OrderStore } from './orders/orderStore.js';
 import { OrderService, UserError } from './orders/orderService.js';
@@ -18,11 +19,16 @@ const registry = new TokenRegistry({ heliusRpc: config.rpcUrl, jupApiKey: config
 registry.startBackgroundRefresh();
 
 const markets = new ManifestMarkets();
+const archer = new ArcherVenue();
+// Every open market stream listens to these; the default warning at 10 listeners would misfire.
+markets.setMaxListeners(0);
+archer.setMaxListeners(0);
 const MIN_TRADE_USD = 0.5;
 const trades = new TradeStore(markets, (market) => {
     const quoteUsd = registry.cachedPrice(markets.summary(market)?.quoteMint);
     return quoteUsd ? MIN_TRADE_USD / quoteUsd : 0;
 });
+trades.setMaxListeners(0);
 const orderStore = new OrderStore();
 const keeperKeypair = loadKeeperKeypair();
 /** Market price for a pair from Jupiter's USD prices (deep, cross-venue), or null if either is unpriced. */
@@ -34,7 +40,10 @@ async function referencePrice(address) {
     return base > 0 && quote > 0 ? base / quote : null;
 }
 
-const orders = new OrderService({ markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey, referencePrice });
+const orders = new OrderService({
+    markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey, referencePrice,
+    jupiter: (path, init) => registry.jupFetch(path, init),
+});
 const keeper = new Keeper({ markets, store: orderStore, keypair: keeperKeypair });
 orders.onPlaced = (id) => keeper.track(id);
 
@@ -48,6 +57,7 @@ await markets.startScanning();
 registry.ensure([...new Set(markets.allSummaries().flatMap(s => [s.baseMint, s.quoteMint]))])
     .catch(err => console.error('Token metadata resolve failed:', err.message));
 keeper.start();
+archer.start();
 const gecko = new GeckoStats(markets);
 gecko.start();
 
@@ -115,9 +125,13 @@ function marketView(s, { withHiLo = false } = {}) {
 }
 
 /** Aggregated book with sub-cent dust levels removed. */
+const MAX_ARCHER_PAIR_MARKETS = 3;
+const archerPairMarkets = (s) => archer.marketsForPair(s.baseMint, s.quoteMint).slice(0, MAX_ARCHER_PAIR_MARKETS);
+
 function bookFor(s, depth) {
     const quoteUsd = registry.cachedPrice(s.quoteMint);
-    return aggregateBook(markets, s, depth, quoteUsd ? 0.01 / quoteUsd : 0);
+    const extra = archerPairMarkets(s).map(m => ({ venue: 'archer', market: m.address, baseMint: m.baseMint, levels: archer.levels(m.address) }));
+    return aggregateBook(markets, s, depth, quoteUsd ? 0.01 / quoteUsd : 0, extra);
 }
 
 function requireMarket(req, res) {
@@ -241,18 +255,21 @@ app.get('/api/stream', (req, res) => {
     const release = markets.subscribe(address);
     const pairMarkets = markets.marketsForPair(s.baseMint, s.quoteMint).slice(0, 5).map(m => m.address).filter(a => a !== address);
     const releasePair = pairMarkets.map(a => markets.subscribe(a));
+    const archerMarkets = archerPairMarkets(s).map(m => m.address);
+    const releaseArcher = archerMarkets.map(a => archer.subscribe(a));
     let bookTimer = null;
     const pushBook = () => {
         bookTimer = null;
         send('book', bookFor(markets.summary(address), 60));
     };
     const onUpdate = (a) => {
-        if ((a === address || pairMarkets.includes(a)) && !bookTimer) bookTimer = setTimeout(pushBook, 200);
+        if ((a === address || pairMarkets.includes(a) || archerMarkets.includes(a)) && !bookTimer) bookTimer = setTimeout(pushBook, 200);
     };
     const onTrade = (m, trade) => {
         if (m === address) send('trade', trade);
     };
     markets.on('update', onUpdate);
+    archer.on('update', onUpdate);
     trades.on('trade', onTrade);
     pushBook();
     const ticker = setInterval(() => send('ticker', marketView(markets.summary(address), { withHiLo: true })), 5000);
@@ -262,12 +279,14 @@ app.get('/api/stream', (req, res) => {
         const left = (streamsPerIp.get(ip) || 1) - 1;
         if (left > 0) streamsPerIp.set(ip, left); else streamsPerIp.delete(ip);
         markets.off('update', onUpdate);
+        archer.off('update', onUpdate);
         trades.off('trade', onTrade);
         clearTimeout(bookTimer);
         clearInterval(ticker);
         clearInterval(ping);
         release();
         releasePair.forEach(r => r());
+        releaseArcher.forEach(r => r());
     });
 });
 
@@ -348,6 +367,9 @@ app.post('/api/orders/prepare', writeLimit, handle(body => orders.prepareOrder(b
 app.post('/api/orders/cancel', writeLimit, handle(body => orders.prepareCancel(body)));
 app.post('/api/orders/withdraw', writeLimit, handle(body => orders.prepareWithdraw(body)));
 app.post('/api/markets/create', writeLimit, handle(body => orders.prepareCreateMarket(body)));
+const quoteLimit = rateLimit('quote', 40, 60_000);
+app.post('/api/swap/quote', quoteLimit, handle(async body => (await orders.quoteSwap(body)).summary));
+app.post('/api/swap/prepare', writeLimit, handle(body => orders.prepareSwap(body)));
 app.post('/api/payout-accounts/close', writeLimit, handle(body => orders.prepareClosePayout(body)));
 app.post('/api/tx/submit', writeLimit, handle(body => orders.submit(body)));
 // A token by mint, with its markets against the quotes we offer for new markets.

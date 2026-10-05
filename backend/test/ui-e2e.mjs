@@ -233,6 +233,12 @@ try {
     await page.removeScriptToEvaluateOnNewDocument(stub.identifier);
     await page.evaluate(() => { window.__refStub = null; });
 
+    step('Market tab quotes through Jupiter (localnet tokens have no route, so it says so)');
+    await clickText('.of-type-tab', 'Market');
+    await page.type('.order-form .of-field input', '5');
+    await page.waitForFunction(() => document.querySelector('.order-form .of-note.warn')?.textContent.includes('No route'), { timeout: 30000 });
+    await clickText('.of-type-tab', 'Limit');
+
     step('Starring a market puts it at the top of the list');
     await page.click('.market-header > .star');
     await page.click('.selector-btn');

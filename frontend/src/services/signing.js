@@ -1,4 +1,4 @@
-import { Transaction } from '@solana/web3.js';
+import { Transaction, VersionedTransaction } from '@solana/web3.js';
 import { postJSON } from './api';
 
 /**
@@ -6,11 +6,14 @@ import { postJSON } from './api';
  * The backend checks they are byte-for-byte what it built before sending anything.
  */
 export async function signAndSubmit(prepared, signAllTransactions) {
-  const txs = prepared.transactions.map(b64 => Transaction.from(Buffer.from(b64, 'base64')));
+  // Market orders come from Jupiter as versioned transactions; everything else is legacy.
+  const txs = prepared.transactions.map(b64 => (prepared.versioned
+    ? VersionedTransaction.deserialize(Buffer.from(b64, 'base64'))
+    : Transaction.from(Buffer.from(b64, 'base64'))));
   const signed = await signAllTransactions(txs);
   return postJSON('/api/tx/submit', {
     id: prepared.id,
-    signed: signed.map(t => t.serialize({ requireAllSignatures: false }).toString('base64')),
+    signed: signed.map(t => Buffer.from(t instanceof VersionedTransaction ? t.serialize() : t.serialize({ requireAllSignatures: false })).toString('base64')),
   });
 }
 

@@ -34,6 +34,9 @@ const PRIORITY_MICROLAMPORTS = 50_000;
 const PREPARE_TTL_MS = 3 * 60 * 1000;
 const NONCES_PER_SETUP = 2;
 const CREATE_MARKET_CU = 100_000;
+const MAX_SLIPPAGE_BPS = 1000;
+const QUOTE_CACHE_MS = 3000;
+const SWAP_MAX_PRIORITY_LAMPORTS = 1_000_000; // cap on Jupiter's priority fee (0.001 SOL)
 /** Buying this far above (or selling this far below) the market price needs explicit consent. */
 export const PRICE_WARN_DEVIATION = 0.05;
 
@@ -71,6 +74,27 @@ function parseWallet(wallet) {
     }
 }
 
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+
+/** A signed versioned transaction must carry exactly the message we built, signed by the wallet. */
+function verifyVersioned(b64, expectedMessage, walletPk) {
+    let tx;
+    try {
+        tx = VersionedTransaction.deserialize(Buffer.from(b64, 'base64'));
+    } catch {
+        throw new UserError('Malformed signed transaction');
+    }
+    const message = Buffer.from(tx.message.serialize());
+    if (!message.equals(expectedMessage)) throw new UserError('Signed transaction does not match the prepared one');
+    const signers = tx.message.staticAccountKeys.slice(0, tx.message.header.numRequiredSignatures);
+    const index = signers.findIndex(k => k.equals(walletPk));
+    const signature = index >= 0 ? tx.signatures[index] : null;
+    if (!signature || signature.every(b => b === 0)) throw new UserError('Transaction is missing the wallet signature');
+    const key = crypto.createPublicKey({ key: Buffer.concat([ED25519_SPKI_PREFIX, walletPk.toBuffer()]), format: 'der', type: 'spki' });
+    if (!crypto.verify(null, message, key, Buffer.from(signature))) throw new UserError('Invalid signature');
+    return tx;
+}
+
 function parseMint(mint) {
     try {
         return new PublicKey(mint);
@@ -80,12 +104,14 @@ function parseMint(mint) {
 }
 
 export class OrderService {
-    constructor({ markets, store, keeperPubkey, referencePrice = null }) {
+    constructor({ markets, store, keeperPubkey, referencePrice = null, jupiter = null }) {
         this.markets = markets;
+        this.jupiter = jupiter; // (pathAndQuery, { method, body }) => Promise<json>, rate limited
         this.referencePrice = referencePrice; // async (marketAddress) => price | null
         this.store = store;
         this.keeperPubkey = keeperPubkey;
         this.pending = new Map(); // prepared-but-unsigned transactions, by id
+        this.quoteCache = new Map(); // Jupiter quotes, briefly, so preview + order don't double-fetch
         setInterval(() => {
             const now = Date.now();
             for (const [id, p] of this.pending) if (now - p.createdAt > PREPARE_TTL_MS) this.pending.delete(id);
@@ -362,6 +388,7 @@ export class OrderService {
             throw new UserError('Unexpected number of signed transactions');
         }
         const walletPk = new PublicKey(pending.wallet);
+        if (pending.versioned) return signedB64.map((b64, i) => verifyVersioned(b64, pending.messages[i], walletPk));
         return signedB64.map((b64, i) => {
             let tx;
             try {
@@ -394,6 +421,11 @@ export class OrderService {
             const signature = await this.send(txs[0], pending);
             pending.nonceAddresses.forEach(a => this.store.addNonce(a, pending.wallet));
             return { ok: true, signature };
+        }
+
+        if (pending.kind === 'swap') {
+            const signature = await this.send(txs[0], pending);
+            return { ok: true, signature, ...pending.result };
         }
 
         if (pending.kind === 'createMarket') {
@@ -448,6 +480,104 @@ export class OrderService {
         });
         this.onPlaced?.(order.id);
         return { ok: true, signature, orderId: order.id, sequenceNumber };
+    }
+
+    // ---------- market orders (Jupiter) ----------
+
+    /**
+     * Price a market order through Jupiter, which routes across every Solana venue (Manifest,
+     * Archer, AMMs) for the best price. Buys spend `amount` quote tokens; sells sell `amount`
+     * base tokens.
+     */
+    async quoteSwap({ market, side, amount, slippageBps = 50 }) {
+        if (!this.jupiter) throw new UserError('Market orders are unavailable');
+        if (side !== 'buy' && side !== 'sell') throw new UserError('side must be buy or sell');
+        const s = this.markets.summary(market);
+        if (!s) throw new UserError('Unknown market');
+        const slippage = Math.round(Number(slippageBps));
+        if (!(slippage >= 1 && slippage <= MAX_SLIPPAGE_BPS)) throw new UserError(`Slippage must be between 0.01% and ${MAX_SLIPPAGE_BPS / 100}%`);
+        const isBuy = side === 'buy';
+        const [inMint, outMint, inDecimals, outDecimals] = isBuy
+            ? [s.quoteMint, s.baseMint, s.quoteDecimals, s.baseDecimals]
+            : [s.baseMint, s.quoteMint, s.baseDecimals, s.quoteDecimals];
+        const inAtoms = toAtoms(amount, inDecimals);
+        if (inAtoms <= 0n) throw new UserError('Enter an amount');
+
+        const key = `${inMint}|${outMint}|${inAtoms}|${slippage}`;
+        const cached = this.quoteCache.get(key);
+        let quote = cached && Date.now() - cached.at < QUOTE_CACHE_MS ? cached.quote : null;
+        if (!quote) {
+            try {
+                quote = await this.jupiter(`/swap/v1/quote?inputMint=${inMint}&outputMint=${outMint}&amount=${inAtoms}&slippageBps=${slippage}&restrictIntermediateTokens=true`);
+            } catch (err) {
+                if (err.status === 400) throw new UserError('No route found for this trade on any Solana venue.');
+                throw err;
+            }
+            this.quoteCache.set(key, { at: Date.now(), quote });
+            for (const [k, v] of this.quoteCache) if (Date.now() - v.at > QUOTE_CACHE_MS) this.quoteCache.delete(k);
+        }
+
+        const inUi = Number(quote.inAmount) / 10 ** inDecimals;
+        const outUi = Number(quote.outAmount) / 10 ** outDecimals;
+        const minOutUi = Number(quote.otherAmountThreshold) / 10 ** outDecimals;
+        const baseUi = isBuy ? outUi : inUi, quoteUi = isBuy ? inUi : outUi;
+        const price = baseUi > 0 ? quoteUi / baseUi : null;
+        // Worst price the slippage limit allows, in quote per base.
+        const worstPrice = isBuy ? (minOutUi > 0 ? inUi / minOutUi : null) : (inUi > 0 ? minOutUi / inUi : null);
+        const reference = this.referencePrice ? await this.referencePrice(market).catch(() => null) : null;
+        const venues = [...new Set((quote.routePlan || []).map(r => r.swapInfo?.label).filter(Boolean))];
+        return {
+            quote,
+            summary: {
+                side, inAmount: inUi, outAmount: outUi, minOut: minOutUi, price, worstPrice,
+                priceImpact: Number(quote.priceImpactPct) || 0,
+                reference, deviation: adverseDeviation(side, worstPrice, reference),
+                venues, slippageBps: slippage,
+            },
+        };
+    }
+
+    async prepareSwap({ wallet, market, side, amount, slippageBps, acknowledgePriceRisk = false }) {
+        const walletPk = parseWallet(wallet);
+        const { quote, summary } = await this.quoteSwap({ market, side, amount, slippageBps });
+        // Judge the WORST price the order allows (slippage included), not the hoped-for one.
+        const off = Math.max(summary.deviation ?? -1, summary.priceImpact);
+        if (!acknowledgePriceRisk && off > PRICE_WARN_DEVIATION) {
+            const err = new UserError(`This market order could fill up to ${(off * 100).toFixed(1)}% worse than the market price. Confirm the price warning to place it anyway.`);
+            err.code = 'PRICE_DEVIATION';
+            throw err;
+        }
+        let built;
+        try {
+            built = await this.jupiter('/swap/v1/swap', {
+                method: 'POST',
+                body: {
+                    quoteResponse: quote,
+                    userPublicKey: walletPk.toBase58(),
+                    wrapAndUnwrapSol: true,
+                    dynamicComputeUnitLimit: true,
+                    prioritizationFeeLamports: { priorityLevelWithMaxLamports: { maxLamports: SWAP_MAX_PRIORITY_LAMPORTS, priorityLevel: 'high' } },
+                },
+            });
+        } catch (err) {
+            throw new UserError(`Jupiter could not build this trade: ${err.message.replace(/^Jupiter API \d+ for [^:]+: /, '')}`);
+        }
+        if (built.simulationError) throw new UserError(`The trade would fail: ${JSON.stringify(built.simulationError).slice(0, 200)}`);
+        const tx = VersionedTransaction.deserialize(Buffer.from(built.swapTransaction, 'base64'));
+        const id = crypto.randomUUID();
+        this.pending.set(id, {
+            kind: 'swap', versioned: true, wallet: walletPk.toBase58(), createdAt: Date.now(),
+            messages: [Buffer.from(tx.message.serialize())],
+            blockhash: tx.message.recentBlockhash, lastValidBlockHeight: built.lastValidBlockHeight,
+            result: { inAmount: summary.inAmount, outAmount: summary.outAmount, price: summary.price },
+        });
+        return {
+            step: 'sign',
+            id,
+            versioned: true,
+            transactions: [built.swapTransaction],
+            summary: { title: `Market ${side}`, ...summary },
+        };
     }
 
     // ---------- new markets ----------
