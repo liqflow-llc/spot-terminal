@@ -7,7 +7,7 @@ module.exports = {
     // nginx proxies juporderbook.com to 127.0.0.1:3000.
     // Payouts are paid by LiqFlow LLC's hot wallet (56Pk…, shared with Skirmish). It only ever
     // holds a little SOL; the treasury is on a hardware wallet.
-    env: { PORT: '3000', HOST: '127.0.0.1', NODE_ENV: 'production', KEEPER_KEYPAIR: '/home/phil/workspace/skirmish/server/airdrop.keypair.json' },
+    env: { PORT: '3000', HOST: '127.0.0.1', NODE_ENV: 'production', KEEPER_KEYPAIR: '/home/phil/workspace/private/56PkvJkiApTphSBnWGT43wdG2YuPf5jWzHK4S7oJ4wzR/keypair.json' },
     error_file: 'logs/pm2-error.log',
     out_file: 'logs/pm2-out.log',
     time: true,
