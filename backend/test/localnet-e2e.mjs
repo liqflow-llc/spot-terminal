@@ -252,6 +252,40 @@ await test('Cancelling one order keeps another order\'s partial proceeds for its
     assert.ok(gained >= 20_000_000n - 20n, 'A paid out its full 20 QUOTE');
 });
 
+await test('Setup deposit is refundable; accounts backing open orders are kept', async () => {
+    const wallet = maker.publicKey.toBase58();
+    service.pending.clear(); // earlier tests left unsigned prepares holding nonces (they expire on their own)
+    const open = await placeOrder({ market: mBQ, side: 'sell', price: '50', size: '1' }); // rests, never fills here
+    const before = await service.payoutAccounts(wallet);
+    log('payout accounts', before.accounts.length, 'in use', before.inUseCount, 'refundable', before.refundableSol, 'SOL');
+    assert.ok(before.inUseCount >= 1, 'the open order\'s account is in use');
+    assert.ok(before.refundableSol > 0, 'something to refund');
+    assert.ok(before.accounts.find(a => a.address === open.nonce)?.inUse, 'open order nonce marked in use');
+
+    const solBefore = await tokenBalance(maker.publicKey, NATIVE);
+    const res = await signAndSubmit(await service.prepareClosePayout({ wallet }));
+    const gained = await tokenBalance(maker.publicKey, NATIVE) - solBefore;
+    log('refunded', res.refundedSol, 'SOL; wallet +', gained, 'lamports (after fee)');
+    assert.equal(res.refundedSol, before.refundableSol);
+    assert.ok(gained > BigInt(Math.round(before.refundableSol * 1e9)) - 100_000n, 'deposit back in wallet, minus a tx fee');
+    assert.ok(await connection.getAccountInfo(new PublicKey(open.nonce)), 'open order\'s payout account still exists');
+    const after = await service.payoutAccounts(wallet);
+    assert.equal(after.refundableSol, 0, 'nothing left to refund while the order is open');
+    await assert.rejects(service.prepareClosePayout({ wallet }), /backing open orders/);
+
+    // The open order still pays out to the wallet if it fills.
+    const quoteBefore = await tokenBalance(maker.publicKey, QUOTE);
+    await swap(mBQ, { baseIn: false, inAtoms: 60_000_000n });
+    await waitFor(() => store.get(open.id).status === 'claimed', 'claim after refund of the other accounts');
+    assert.ok(await tokenBalance(maker.publicKey, QUOTE) - quoteBefore >= 50_000_000n - 10n, 'open order paid out');
+
+    // Its account is free now: refund it too, and the next order asks for setup again.
+    await signAndSubmit(await service.prepareClosePayout({ wallet }));
+    assert.equal((await service.payoutAccounts(wallet)).accounts.length, 0, 'all payout accounts closed');
+    const next = await service.prepareOrder({ wallet, market: mBQ, side: 'buy', price: '1', size: '1' });
+    assert.equal(next.step, 'setup', 'setup required again after the refund');
+});
+
 await sleep(1000);
 console.log(failures ? `\n${failures} test(s) FAILED` : '\nAll tests passed');
 fs.rmSync(dataDir, { recursive: true, force: true });

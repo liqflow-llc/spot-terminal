@@ -86,7 +86,7 @@ export class OrderService {
         const [baseInfo, quoteInfo, baseGlobal, quoteGlobal, walletInfo] = infos;
         if (!baseInfo || !quoteInfo) throw new Error('Market mints not found');
 
-        const inUse = this.store.noncesInUse(walletPk.toBase58());
+        const inUse = this.noncesSpokenFor(walletPk.toBase58());
         const nonces = [];
         nonceAddrs.forEach((addr, i) => {
             const info = infos[5 + i];
@@ -110,6 +110,18 @@ export class OrderService {
             nonces,
             freeNonces: nonces.filter(n => n.free),
         };
+    }
+
+    /** Nonces backing live orders, orders being placed, or a refund the user is signing. */
+    noncesSpokenFor(wallet) {
+        const used = this.store.noncesInUse(wallet);
+        for (const o of this.store.forWallet(wallet)) if (o.status === 'placing') used.add(o.nonce);
+        for (const p of this.pending.values()) {
+            if (p.wallet !== wallet) continue;
+            if (p.kind === 'order') used.add(p.order.nonce);
+            if (p.kind === 'closePayout') p.nonceAddresses.forEach(a => used.add(a));
+        }
+        return used;
     }
 
     async tokenBalanceAtoms(walletPk, mint, tokenProgram, lamports) {
@@ -153,6 +165,7 @@ export class OrderService {
             summary: {
                 title: 'Enable instant payouts',
                 detail: `One-time setup: creates ${NONCES_PER_SETUP} payout accounts so filled orders return to your wallet automatically. Refundable deposit ${((rent * NONCES_PER_SETUP) / 1e9).toFixed(5)} SOL.`,
+                depositSol: (rent * NONCES_PER_SETUP) / 1e9,
             },
         };
     }
@@ -352,6 +365,14 @@ export class OrderService {
             return { ok: true, signature };
         }
 
+        if (pending.kind === 'closePayout') {
+            const busy = this.store.noncesInUse(pending.wallet);
+            if (pending.nonceAddresses.some(a => busy.has(a))) throw new UserError('An order started using these payout accounts, please try the refund again.');
+            const signature = await this.send(txs[0], pending);
+            pending.nonceAddresses.forEach(a => this.store.removeNonce(a));
+            return { ok: true, signature, refundedSol: pending.refundLamports / 1e9 };
+        }
+
         if (pending.kind === 'cancel' || pending.kind === 'withdraw') {
             const signature = await this.send(txs[0], pending);
             if (pending.orderId) this.store.update(pending.orderId, { status: 'cancelled', cancelSignature: signature });
@@ -359,6 +380,9 @@ export class OrderService {
         }
 
         // Order: record the claim before sending so a crash can never lose it.
+        if (!this.store.noncesFor(pending.wallet).includes(pending.order.nonce)) {
+            throw new UserError('Your payout accounts were refunded, please place the order again.');
+        }
         const [place, claim] = txs;
         const order = this.store.put({
             ...pending.order,
@@ -387,6 +411,68 @@ export class OrderService {
         });
         this.onPlaced?.(order.id);
         return { ok: true, signature, orderId: order.id, sequenceNumber };
+    }
+
+    // ---------- payout accounts (durable nonces) ----------
+
+    /** A wallet's payout accounts and how much of their deposit can be refunded right now. */
+    async payoutAccounts(wallet) {
+        const walletPk = parseWallet(wallet);
+        const addrs = this.store.noncesFor(walletPk.toBase58());
+        const infos = addrs.length ? await connection.getMultipleAccountsInfo(addrs.map(a => new PublicKey(a)), 'confirmed') : [];
+        const inUse = this.noncesSpokenFor(walletPk.toBase58());
+        const accounts = [];
+        addrs.forEach((address, i) => {
+            const info = infos[i];
+            if (!info || !info.owner.equals(SystemProgram.programId) || info.data.length !== NONCE_ACCOUNT_LENGTH) return;
+            if (!NonceAccount.fromAccountData(info.data).authorizedPubkey.equals(walletPk)) return;
+            accounts.push({ address, lamports: info.lamports, inUse: inUse.has(address) });
+        });
+        const free = accounts.filter(a => !a.inUse);
+        return {
+            accounts,
+            refundableSol: free.reduce((s, a) => s + a.lamports, 0) / 1e9,
+            lockedSol: accounts.filter(a => a.inUse).reduce((s, a) => s + a.lamports, 0) / 1e9,
+            inUseCount: accounts.length - free.length,
+        };
+    }
+
+    /**
+     * Close every payout account not backing an open order, returning its deposit to the wallet.
+     * Accounts backing open orders stay: closing one would void that order's automatic payout.
+     */
+    async prepareClosePayout({ wallet }) {
+        const walletPk = parseWallet(wallet);
+        const { accounts, inUseCount } = await this.payoutAccounts(wallet);
+        const closable = accounts.filter(a => !a.inUse);
+        if (!closable.length) {
+            throw new UserError(inUseCount
+                ? 'Your payout accounts are backing open orders. Cancel or wait for those orders to fill, then try again.'
+                : 'You have no payout accounts to refund.');
+        }
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+        const tx = new Transaction({ feePayer: walletPk, blockhash, lastValidBlockHeight });
+        tx.add(...priorityIxs(5_000 + closable.length * 2_000));
+        // Withdrawing a nonce account's whole balance closes it.
+        for (const a of closable) {
+            tx.add(SystemProgram.nonceWithdraw({
+                noncePubkey: new PublicKey(a.address), authorizedPubkey: walletPk, toPubkey: walletPk, lamports: a.lamports,
+            }));
+        }
+        await this.simulateOrThrow(tx);
+        const refundLamports = closable.reduce((s, a) => s + a.lamports, 0);
+        const id = crypto.randomUUID();
+        this.pending.set(id, {
+            kind: 'closePayout', wallet: walletPk.toBase58(), createdAt: Date.now(),
+            messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight,
+            nonceAddresses: closable.map(a => a.address), refundLamports,
+        });
+        return {
+            step: 'sign',
+            id,
+            transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')],
+            summary: { title: 'Refund deposit', detail: `Returns ${(refundLamports / 1e9).toFixed(5)} SOL to your wallet.` },
+        };
     }
 
     // ---------- cancel / withdraw ----------

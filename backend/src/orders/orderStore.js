@@ -64,6 +64,11 @@ export class OrderStore {
         this.save();
     }
 
+    removeNonce(address) {
+        this.nonces.delete(address);
+        this.save();
+    }
+
     noncesFor(wallet) {
         return [...this.nonces.entries()].filter(([, v]) => v.wallet === wallet).map(([k]) => k);
     }

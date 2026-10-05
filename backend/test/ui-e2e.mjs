@@ -165,6 +165,8 @@ try {
     await sleep(300);
     await clickText('.of-submit', 'Sell');
     // First order: the one-time setup dialog.
+    await page.waitForFunction(() => document.querySelector('.modal')?.textContent.includes('Account page'), { timeout: 20000 });
+    await shot('0-setup-dialog');
     await clickText('.modal button', 'Continue');
     await page.waitForFunction(() => [...document.querySelectorAll('.toast-title')].some(t => t.textContent.includes('order placed')), { timeout: 60000 });
     const approvals = await page.evaluate(() => window.__signCount);
@@ -195,6 +197,14 @@ try {
     if (quoteAfter - quoteBefore < 24_999_000n) throw new Error('payout did not reach the wallet');
     if (await page.evaluate(() => window.__signCount) !== 2) throw new Error('payout should not need another approval');
     await shot('2-paid-out');
+
+    step('Refunding the setup deposit from the Account page');
+    await clickText('.topnav-item', 'Account');
+    await clickText('.account-card button', 'Refund');
+    await page.waitForFunction(() => [...document.querySelectorAll('.toast-title')].some(t => t.textContent.includes('Refunded')), { timeout: 60000 });
+    await page.waitForFunction(() => document.querySelector('.account-card')?.textContent.includes('Nothing to refund'), { timeout: 20000 });
+    if (await page.evaluate(() => window.__signCount) !== 3) throw new Error('refund should be exactly one approval');
+    await shot('3-refunded');
     if (errors.length) console.log('  page errors:', errors.slice(0, 5));
     console.log('\nUI test passed');
 } catch (err) {

@@ -1,0 +1,15 @@
+.account-page { overflow-y: auto; }
+.account-main { width: 100%; max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; box-sizing: border-box; }
+.account-main h1 { font-size: 20px; margin: 0 0 16px; }
+.account-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+.account-card h2 { font-size: 15px; margin: 0; }
+.account-card p { margin: 0; }
+.account-card .small { font-size: 12px; }
+.account-row { display: flex; align-items: center; gap: 10px; color: var(--text-2); }
+.account-row.error { color: var(--ask); }
+.account-connect { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; color: var(--text-2); }
+.account-connect .wallet-adapter-button { height: 34px; font: 600 13px var(--font); border-radius: var(--radius); background: var(--accent); line-height: 34px; }
+.account-stats { display: flex; gap: 32px; margin: 0; flex-wrap: wrap; }
+.account-stats dt { color: var(--muted); font-size: 12px; }
+.account-stats dd { margin: 2px 0 0; font-size: 18px; font-weight: 600; }
+.account-card .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }

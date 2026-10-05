@@ -314,7 +314,16 @@ const writeLimit = rateLimit('write', 30, 60_000);
 app.post('/api/orders/prepare', writeLimit, handle(body => orders.prepareOrder(body)));
 app.post('/api/orders/cancel', writeLimit, handle(body => orders.prepareCancel(body)));
 app.post('/api/orders/withdraw', writeLimit, handle(body => orders.prepareWithdraw(body)));
+app.post('/api/payout-accounts/close', writeLimit, handle(body => orders.prepareClosePayout(body)));
 app.post('/api/tx/submit', writeLimit, handle(body => orders.submit(body)));
+app.get('/api/payout-accounts', rateLimit('account', 40, 60_000), async (req, res) => {
+    try {
+        res.set('Cache-Control', 'no-cache');
+        res.json(await orders.payoutAccounts(String(req.query.wallet || '')));
+    } catch (err) {
+        res.status(err.status || 500).json({ error: err instanceof UserError ? err.message : 'Failed to load payout accounts.' });
+    }
+});
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 

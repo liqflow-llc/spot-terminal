@@ -19,6 +19,9 @@ Users never deposit, withdraw or wrap SOL by hand.
 - A wallet's **first order** needs a one-time setup approval that creates two nonce accounts
   (refundable rent, ~0.0029 SOL), because a claim must reference a nonce that already exists.
   Each order then reuses a free nonce, and a spare is topped up automatically.
+  The **Account** page (`/account`) refunds that rent anytime: it closes every nonce account not
+  backing an open order (`SystemProgram.nonceWithdraw` of the full balance); the next order asks
+  for setup again.
 - Partial fills stay in the market until the order fills completely, is cancelled, or the user
   withdraws from the app.
 

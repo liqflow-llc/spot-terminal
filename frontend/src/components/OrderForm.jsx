@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 import Modal from './Modal.jsx';
@@ -186,7 +187,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
 
       {setupPrompt && (
         <Modal
-          title="One-time setup: instant payouts"
+          title="One-time refundable deposit"
           onClose={() => setupPrompt.resolve(false)}
           actions={(
             <>
@@ -195,13 +196,11 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
             </>
           )}
         >
-          <p>Before your first order, your wallet creates two small payout accounts. They let your filled orders pay out to your wallet automatically, without you signing again.</p>
-          <ul>
-            <li>You only do this once per wallet.</li>
-            <li>{setupPrompt.summary?.detail?.match(/Refundable deposit [\d.]+ SOL/)?.[0] || 'Refundable SOL deposit'}, returned when the accounts are closed.</li>
-            <li>The payout can only ever send funds to your own wallet.</li>
-          </ul>
-          <p>Next you'll approve this setup, then the order itself.</p>
+          <p>
+            Your first order needs a one-time deposit of{' '}
+            <strong>{setupPrompt.summary?.depositSol ? `${setupPrompt.summary.depositSol.toFixed(4)} SOL` : 'a little SOL'}</strong>{' '}
+            to set up your account. Get it back anytime on the <Link to="/account" target="_blank">Account page</Link>.
+          </p>
         </Modal>
       )}
     </div>
