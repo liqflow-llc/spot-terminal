@@ -20,17 +20,31 @@ export function useMarketStream(address) {
     getJSON(`/api/markets/${address}`).then(m => !closed && setMarket(m)).catch(err => !closed && setError(err.message));
     getJSON(`/api/markets/${address}/trades?limit=80`).then(r => !closed && setTrades(r.trades)).catch(() => {});
 
-    const es = new EventSource(`/api/stream?market=${encodeURIComponent(address)}`);
-    es.addEventListener('book', (e) => setBook(JSON.parse(e.data)));
-    es.addEventListener('ticker', (e) => setMarket(JSON.parse(e.data)));
-    es.addEventListener('trade', (e) => {
-      const trade = JSON.parse(e.data);
-      setTrades(ts => [trade, ...ts].slice(0, 120));
-      tradeListeners.current.forEach(fn => fn(trade));
-    });
+    // The server polls the chain for every open stream, so drop it while the tab is hidden and
+    // reconnect (with a fresh book) when it's visible again.
+    let es = null;
+    const open = () => {
+      if (es || closed) return;
+      es = new EventSource(`/api/stream?market=${encodeURIComponent(address)}`);
+      es.addEventListener('book', (e) => setBook(JSON.parse(e.data)));
+      es.addEventListener('ticker', (e) => setMarket(JSON.parse(e.data)));
+      es.addEventListener('trade', (e) => {
+        const trade = JSON.parse(e.data);
+        setTrades(ts => [trade, ...ts].slice(0, 120));
+        tradeListeners.current.forEach(fn => fn(trade));
+      });
+    };
+    const close = () => {
+      es?.close();
+      es = null;
+    };
+    const onVisibility = () => (document.visibilityState === 'hidden' ? close() : open());
+    if (document.visibilityState !== 'hidden') open();
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       closed = true;
-      es.close();
+      document.removeEventListener('visibilitychange', onVisibility);
+      close();
     };
   }, [address]);
 

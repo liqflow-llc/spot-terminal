@@ -40,11 +40,6 @@ export class Keeper {
         }).catch(() => {});
     }
 
-    /** Called by the fill feed: a resting order on `market` just traded. */
-    onFill(fill) {
-        if (this.releases.has(fill.market)) setTimeout(() => this.checkMarket(fill.market), 1500);
-    }
-
     track(orderId) {
         const order = this.store.get(orderId);
         if (order) this.watch(order.market);
@@ -52,7 +47,7 @@ export class Keeper {
     }
 
     watch(market) {
-        if (!this.releases.has(market)) this.releases.set(market, this.markets.subscribe(market));
+        if (!this.releases.has(market)) this.releases.set(market, this.markets.subscribe(market, { viewer: false }));
     }
 
     sweep() {

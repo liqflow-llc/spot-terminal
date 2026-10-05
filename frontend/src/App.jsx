@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { Navigate, Route, Routes, useSearchParams } from 'react-router-dom';
 import TradePage from './components/TradePage.jsx';
 import AccountPage from './components/AccountPage.jsx';
+import Terms from './legal/Terms.jsx';
+import Privacy from './legal/Privacy.jsx';
 import { getJSON } from './services/api';
 
 /** Send "/" to the busiest verified market. */
@@ -36,6 +38,8 @@ export default function App() {
       <Route path="/" element={<DefaultMarket />} />
       <Route path="/trade/:address" element={<TradePage />} />
       <Route path="/account" element={<AccountPage />} />
+      <Route path="/terms" element={<Terms />} />
+      <Route path="/privacy" element={<Privacy />} />
       <Route path="/orderbook" element={<LegacyOrderbook />} />
       <Route path="*" element={<DefaultMarket />} />
     </Routes>

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { getJSON } from '../services/api';
 
-const POLL_MS = 6000;
+const POLL_MS = 10_000;
 
 /** Wallet balances, balances held in the market, and this app's orders for the wallet. */
 export function useAccount(wallet, market) {
@@ -20,8 +20,11 @@ export function useAccount(wallet, market) {
     setAccount(null);
     if (!wallet) return undefined;
     refresh();
-    const t = setInterval(refresh, POLL_MS);
-    return () => clearInterval(t);
+    // Every refresh costs an RPC call: skip it while the tab is in the background.
+    const t = setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, POLL_MS);
+    const onVisible = () => { if (document.visibilityState === 'visible') refresh(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVisible); };
   }, [wallet, market, refresh]);
 
   return { account, refresh };

@@ -6,3 +6,8 @@
 .modal-body ul { margin: 0 0 10px; padding-left: 18px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .modal-actions .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.modal.danger { border-color: var(--ask); }
+.modal.danger .modal-title { color: var(--ask); }
+.modal-actions .danger { background: var(--ask); border-color: var(--ask); color: #fff; }
+.danger-text { color: var(--ask); }

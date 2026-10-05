@@ -34,6 +34,14 @@ const PRIORITY_MICROLAMPORTS = 50_000;
 const PREPARE_TTL_MS = 3 * 60 * 1000;
 const NONCES_PER_SETUP = 2;
 const CREATE_MARKET_CU = 100_000;
+/** Buying this far above (or selling this far below) the market price needs explicit consent. */
+export const PRICE_WARN_DEVIATION = 0.05;
+
+/** How much worse than the reference price an order is on the side that loses money, or null. */
+export function adverseDeviation(side, price, reference) {
+    if (!(reference > 0) || !(price > 0)) return null;
+    return side === 'buy' ? price / reference - 1 : 1 - price / reference;
+}
 
 export class UserError extends Error {
     constructor(message) {
@@ -72,8 +80,9 @@ function parseMint(mint) {
 }
 
 export class OrderService {
-    constructor({ markets, store, keeperPubkey }) {
+    constructor({ markets, store, keeperPubkey, referencePrice = null }) {
         this.markets = markets;
+        this.referencePrice = referencePrice; // async (marketAddress) => price | null
         this.store = store;
         this.keeperPubkey = keeperPubkey;
         this.pending = new Map(); // prepared-but-unsigned transactions, by id
@@ -182,11 +191,23 @@ export class OrderService {
 
     // ---------- place ----------
 
-    async prepareOrder({ wallet, market, side, price, size, postOnly = false }) {
+    async prepareOrder({ wallet, market, side, price, size, postOnly = false, acknowledgePriceRisk = false }) {
         const walletPk = parseWallet(wallet);
         if (side !== 'buy' && side !== 'sell') throw new UserError('side must be buy or sell');
         const tokenPrice = Number(price);
         if (!(tokenPrice > 0)) throw new UserError('Enter a price above zero');
+
+        // A bid far above the market (or an ask far below) is filled at the user's own price,
+        // by the book or by arbitrageurs, so it needs an explicit OK (the order form warns first).
+        if (this.referencePrice && !acknowledgePriceRisk) {
+            const reference = await this.referencePrice(market).catch(() => null);
+            const off = adverseDeviation(side, tokenPrice, reference);
+            if (off != null && off > PRICE_WARN_DEVIATION) {
+                const err = new UserError(`This ${side} price is ${(off * 100).toFixed(1)}% ${side === 'buy' ? 'above' : 'below'} the market price (${reference.toPrecision(6)}). Confirm the price warning to place it anyway.`);
+                err.code = 'PRICE_DEVIATION';
+                throw err;
+            }
+        }
 
         const ctx = await this.loadContext(walletPk, market);
         if (!ctx.freeNonces.length) return this.prepareNonceSetup(walletPk);

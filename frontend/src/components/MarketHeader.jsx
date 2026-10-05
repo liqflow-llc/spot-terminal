@@ -6,6 +6,7 @@ import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 import Modal from './Modal.jsx';
 import { useToast } from './Toasts.jsx';
 import { getJSON, postJSON } from '../services/api';
+import { useFavorites } from '../hooks/useFavorites';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
 import { formatPct, formatPrice, formatUsd, formatAmount } from '../utils/format';
 import './MarketHeader.css';
@@ -38,10 +39,28 @@ function SortHead({ id, label, sort, setSort }) {
   );
 }
 
+function Star({ on, onClick, size = 14 }) {
+  return (
+    <button
+      type="button"
+      className={`star ${on ? 'on' : ''}`}
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      aria-pressed={on}
+      aria-label={on ? 'Remove from favorites' : 'Add to favorites'}
+      title={on ? 'Remove from favorites' : 'Add to favorites'}
+      style={{ fontSize: size }}
+    >
+      {on ? '★' : '☆'}
+    </button>
+  );
+}
+
 function MarketSelector({ market }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [list, setList] = useState(null);
+  const [favList, setFavList] = useState([]);
+  const { favorites, isFavorite, toggle } = useFavorites();
   const [sort, setSort] = useState(null);
   const [token, setToken] = useState(null); // pasted mint: { token, quotes: [{ symbol, mint, market }] }
   const [create, setCreate] = useState(null); // { base, quote, prepared, busy }
@@ -60,6 +79,15 @@ function MarketSelector({ market }) {
     }, query ? 150 : 0);
     return () => clearTimeout(t);
   }, [open, query]);
+
+  // Favourites may be outside the top-150 list, so fetch them by address.
+  const favKey = favorites.join(',');
+  useEffect(() => {
+    if (!open || !favKey) return setFavList([]);
+    let live = true;
+    getJSON(`/api/markets?addresses=${favKey}`).then(r => live && setFavList(r.markets)).catch(() => {});
+    return () => { live = false; };
+  }, [open, favKey]);
 
   // A pasted mint can be turned into a new market if it has none yet.
   useEffect(() => {
@@ -114,7 +142,13 @@ function MarketSelector({ market }) {
     }
   }
 
-  const sorted = sortMarkets(list, sort);
+  // Starred markets first (those matching the search, when searching), each group sorted.
+  const q = query.trim().toLowerCase();
+  const favMatches = list ? favList.filter(m => isFavorite(m.address) && (!q || list.some(x => x.address === m.address) || m.symbol.toLowerCase().includes(q))) : [];
+  const sorted = list && [
+    ...(sortMarkets(favMatches, sort) || []),
+    ...(sortMarkets(list.filter(m => !isFavorite(m.address)), sort) || []),
+  ];
   const creatable = token?.quotes.filter(q => !q.market && !list?.some(m => m.base.mint === token.token.mint && m.quote.mint === q.mint)) || [];
 
   return (
@@ -138,20 +172,24 @@ function MarketSelector({ market }) {
             onChange={e => setQuery(e.target.value)}
           />
           <div className="selector-head">
+            <span />
             <SortHead id="pair" label="Pair" sort={sort} setSort={setSort} />
             <SortHead id="last" label="Last" sort={sort} setSort={setSort} />
             <SortHead id="vol" label="24h vol" sort={sort} setSort={setSort} />
           </div>
           <div className="selector-list">
             {!list && <div className="selector-empty"><span className="spinner" /></div>}
-            {list && !list.length && !creatable.length && <div className="selector-empty">No markets match.</div>}
+            {list && !sorted.length && !creatable.length && <div className="selector-empty">No markets match.</div>}
             {sorted?.map(m => (
-              <button
-                type="button"
+              <div
+                role="button"
+                tabIndex={0}
                 key={m.address}
-                className={`selector-row ${m.address === market?.address ? 'current' : ''}`}
+                className={`selector-row ${m.address === market?.address ? 'current' : ''} ${isFavorite(m.address) ? 'fav' : ''}`}
                 onClick={() => go(m.address)}
+                onKeyDown={(e) => { if (e.key === 'Enter') go(m.address); }}
               >
+                <Star on={isFavorite(m.address)} onClick={() => toggle(m.address)} />
                 <span className="selector-pair">
                   <TokenIcon token={m.base} size={18} />
                   <span>{m.base.symbol}<span className="muted">/{m.quote.symbol}</span></span>
@@ -159,7 +197,7 @@ function MarketSelector({ market }) {
                 </span>
                 <span className="num">{formatPrice(m.last)}</span>
                 <span className="num muted">{m.volume24hUsd != null ? formatUsd(m.volume24hUsd) : '—'}</span>
-              </button>
+              </div>
             ))}
             {creatable.length > 0 && (
               <div className="selector-create">
@@ -203,6 +241,7 @@ function MarketSelector({ market }) {
 }
 
 export default function MarketHeader({ market }) {
+  const { isFavorite, toggle } = useFavorites();
   const prev = useRef(null);
   const [tick, setTick] = useState('');
   useEffect(() => {
@@ -215,6 +254,7 @@ export default function MarketHeader({ market }) {
   return (
     <div className="market-header">
       <MarketSelector market={market} />
+      {market && <Star on={isFavorite(market.address)} onClick={() => toggle(market.address)} size={18} />}
       {market && (
         <div className="stats">
           <div className={`stat-last num ${tick}`}>

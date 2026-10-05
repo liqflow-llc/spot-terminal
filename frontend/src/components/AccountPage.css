@@ -13,3 +13,4 @@
 .account-stats dt { color: var(--muted); font-size: 12px; }
 .account-stats dd { margin: 2px 0 0; font-size: 18px; font-weight: 600; }
 .account-card .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.account-legal { margin-top: 16px; }

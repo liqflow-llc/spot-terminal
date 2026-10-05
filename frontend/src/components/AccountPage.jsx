@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 import TopBar from './TopBar.jsx';
 import { useToast } from './Toasts.jsx';
 import { getJSON, postJSON } from '../services/api';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
+import '../legal/Legal.css';
 import './AccountPage.css';
 
 const sol = (n) => `${Number(n || 0).toFixed(5)} SOL`;
@@ -96,6 +98,10 @@ export default function AccountPage() {
             )
           )}
         </section>
+        <p className="legal-links account-legal">
+          <Link to="/terms">Terms of Service</Link>
+          <Link to="/privacy">Privacy Policy</Link>
+        </p>
       </main>
     </div>
   );

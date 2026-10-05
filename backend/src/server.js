@@ -2,11 +2,11 @@ import fs from 'fs';
 import path from 'path';
 import express from 'express';
 import { PublicKey } from '@solana/web3.js';
+import { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { config } from './config.js';
 import { connection } from './solana.js';
 import { TokenRegistry } from './tokens/tokenRegistry.js';
 import { ManifestMarkets } from './venues/manifest/markets.js';
-import { ManifestFillFeed } from './venues/manifest/fills.js';
 import { TradeStore, SUPPORTED_RESOLUTIONS } from './marketdata/tradeStore.js';
 import { OrderStore } from './orders/orderStore.js';
 import { OrderService, UserError } from './orders/orderService.js';
@@ -23,23 +23,30 @@ const trades = new TradeStore(markets, (market) => {
     const quoteUsd = registry.cachedPrice(markets.summary(market)?.quoteMint);
     return quoteUsd ? MIN_TRADE_USD / quoteUsd : 0;
 });
-const fills = new ManifestFillFeed();
 const orderStore = new OrderStore();
 const keeperKeypair = loadKeeperKeypair();
-const orders = new OrderService({ markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey });
+/** Market price for a pair from Jupiter's USD prices (deep, cross-venue), or null if either is unpriced. */
+async function referencePrice(address) {
+    const s = markets.summary(address);
+    if (!s) return null;
+    const prices = await registry.getPrices([s.baseMint, s.quoteMint]);
+    const base = prices[s.baseMint], quote = prices[s.quoteMint];
+    return base > 0 && quote > 0 ? base / quote : null;
+}
+
+const orders = new OrderService({ markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey, referencePrice });
 const keeper = new Keeper({ markets, store: orderStore, keypair: keeperKeypair });
 orders.onPlaced = (id) => keeper.track(id);
 
-fills.on('fill', (fill) => {
-    trades.addFill(fill);
-    keeper.onFill(fill);
+markets.on('fills', (address, fills) => {
+    const time = Date.now();
+    for (const fill of fills) trades.addTrade(address, fill, time);
 });
 
 await markets.startScanning();
 // Token metadata for everything listed on Manifest (cached on disk after the first run).
 registry.ensure([...new Set(markets.allSummaries().flatMap(s => [s.baseMint, s.quoteMint]))])
     .catch(err => console.error('Token metadata resolve failed:', err.message));
-fills.start();
 keeper.start();
 const gecko = new GeckoStats(markets);
 gecko.start();
@@ -130,6 +137,11 @@ app.use(express.json({ limit: '64kb' }));
 // Behind Cloudflare -> nginx, the visitor is in CF-Connecting-IP (nginx passes it through).
 const clientIp = (req) => String(req.headers['cf-connecting-ip'] || req.socket.remoteAddress || 'unknown');
 const buckets = new Map(); // `${name}|${ip}` -> { count, resetAt }
+// Forget expired counters, so IPs aren't kept in memory past their window (the Privacy Policy says so).
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, b] of buckets) if (now >= b.resetAt) buckets.delete(key);
+}, 60_000).unref();
 function rateLimit(name, max, windowMs) {
     return (req, res, next) => {
         const key = `${name}|${clientIp(req)}`;
@@ -159,6 +171,12 @@ app.get('/api/markets', (req, res) => {
     const limit = Math.min(500, Number(req.query.limit) || 200);
     // Empty markets only show up when searched for by exact mint or address (e.g. one just created).
     const exactHit = (s) => q && (s.baseMint === req.query.q || s.quoteMint === req.query.q || s.address === req.query.q);
+    // ?addresses=a,b,c: exactly those markets (favourites), whatever their activity.
+    if (req.query.addresses) {
+        const wanted = String(req.query.addresses).split(',').slice(0, 100);
+        res.set('Cache-Control', 'no-cache');
+        return res.json({ markets: wanted.map(a => markets.summary(a)).filter(Boolean).map(marketView) });
+    }
     let list = markets.allSummaries().filter(s => s.bidCount + s.askCount > 0 || exactHit(s)).map(marketView);
     if (q) list = list.filter(m => m.symbol.toLowerCase().includes(q) || m.base.mint === req.query.q || m.address === req.query.q);
     // Exact token matches first (so "JUP" finds JUP before JupSOL), then verified pairs with
@@ -182,6 +200,16 @@ app.get('/api/markets/:address/book', (req, res) => {
     if (!s) return;
     res.set('Cache-Control', 'no-cache');
     res.json(bookFor(s, Number(req.query.depth) || 60));
+});
+
+app.get('/api/markets/:address/reference', rateLimit('reference', 60, 60_000), async (req, res) => {
+    if (!requireMarket(req, res)) return;
+    try {
+        res.set('Cache-Control', 'no-cache');
+        res.json({ price: await referencePrice(req.params.address), source: 'Jupiter', at: Date.now() });
+    } catch {
+        res.json({ price: null, source: 'Jupiter', at: Date.now() });
+    }
 });
 
 app.get('/api/markets/:address/trades', (req, res) => {
@@ -257,7 +285,7 @@ app.get('/api/account', rateLimit('account', 40, 60_000), async (req, res) => {
     const out = { orders: orderStore.forWallet(wallet).slice(0, 100).map(publicOrder), wallet: null, inMarket: null };
     if (s) {
         const market = markets.get(address);
-        const [walletBalances] = await Promise.all([walletTokenBalances(walletPk, [s.baseMint, s.quoteMint])]);
+        const walletBalances = await walletTokenBalances(walletPk, [s.baseMint, s.quoteMint], { [s.baseMint]: s.baseDecimals, [s.quoteMint]: s.quoteDecimals });
         out.wallet = { base: walletBalances[s.baseMint] ?? 0, quote: walletBalances[s.quoteMint] ?? 0 };
         if (market?.hasSeat(walletPk)) {
             out.inMarket = {
@@ -283,21 +311,24 @@ function publicOrder(o) {
 }
 
 const NATIVE = 'So11111111111111111111111111111111111111112';
-async function walletTokenBalances(walletPk, mints) {
+/**
+ * Wallet balances of these mints, from the wallet's associated token accounts (under both token
+ * programs) and its SOL, in ONE getMultipleAccounts call (1 RPC credit). Tokens held in other,
+ * non-associated accounts aren't counted; the app only ever uses associated accounts.
+ */
+async function walletTokenBalances(walletPk, mints, decimals) {
     const out = {};
-    const [lamports, ...programs] = await Promise.all([
-        connection.getBalance(walletPk, 'confirmed'),
-        connection.getParsedTokenAccountsByOwner(walletPk, { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }, 'confirmed'),
-        connection.getParsedTokenAccountsByOwner(walletPk, { programId: new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb') }, 'confirmed'),
-    ]);
-    for (const { value } of programs) {
-        for (const a of value) {
-            const info = a.account.data.parsed.info;
-            if (mints.includes(info.mint)) out[info.mint] = (out[info.mint] || 0) + Number(info.tokenAmount.uiAmount || 0);
-        }
-    }
+    const atas = mints.flatMap(mint => [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID].map(program => ({
+        mint, address: getAssociatedTokenAddressSync(new PublicKey(mint), walletPk, true, program),
+    })));
+    const infos = await connection.getMultipleAccountsInfo([walletPk, ...atas.map(a => a.address)], 'confirmed');
+    atas.forEach(({ mint }, i) => {
+        const data = infos[i + 1]?.data;
+        if (!data || data.length < 72) return;
+        out[mint] = (out[mint] || 0) + Number(data.readBigUInt64LE(64)) / 10 ** decimals[mint];
+    });
     // Native SOL counts as SOL (wSOL is unwrapped automatically).
-    if (mints.includes(NATIVE)) out[NATIVE] = (out[NATIVE] || 0) + lamports / 1e9;
+    if (mints.includes(NATIVE)) out[NATIVE] = (out[NATIVE] || 0) + (infos[0]?.lamports ?? 0) / 1e9;
     return out;
 }
 
@@ -308,7 +339,7 @@ const handle = (fn) => async (req, res) => {
         res.json(await fn(req.body || {}));
     } catch (err) {
         if (!(err instanceof UserError)) console.error(`${req.path} failed:`, err);
-        res.status(err.status || 500).json({ error: err instanceof UserError ? err.message : 'Something went wrong, please try again.' });
+        res.status(err.status || 500).json(err instanceof UserError ? { error: err.message, code: err.code } : { error: 'Something went wrong, please try again.' });
     }
 };
 

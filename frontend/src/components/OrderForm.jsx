@@ -4,14 +4,25 @@ import { useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 import Modal from './Modal.jsx';
 import { useToast } from './Toasts.jsx';
-import { postJSON } from '../services/api';
+import { getJSON, postJSON } from '../services/api';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
-import { formatAmount, priceDecimals, toInputString } from '../utils/format';
+import { formatAmount, formatPrice, priceDecimals, toInputString } from '../utils/format';
+import '../legal/Legal.css';
 import './OrderForm.css';
 
 const SOL = 'So11111111111111111111111111111111111111112';
 const SOL_RESERVE = 0.02; // keep some SOL for fees and token-account rent
 const PERCENTS = [25, 50, 75, 100];
+// Matches PRICE_WARN_DEVIATION on the backend, which refuses such orders without consent.
+const WARN_DEVIATION = 0.05;
+const SLOW_FILL_DEVIATION = 0.2;
+const REFERENCE_REFRESH_MS = 30_000;
+
+/** How much worse than the market an order is on the side that loses money (negative = safe side). */
+function adverseDeviation(side, price, reference) {
+  if (!(reference > 0) || !(price > 0)) return null;
+  return side === 'buy' ? price / reference - 1 : 1 - price / reference;
+}
 
 export default function OrderForm({ market, book, account, pickedPrice, onPlaced }) {
   const { publicKey, signAllTransactions } = useWallet();
@@ -23,6 +34,8 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
   const [postOnly, setPostOnly] = useState(false);
   const [busy, setBusy] = useState(null);
   const [setupPrompt, setSetupPrompt] = useState(null);
+  const [riskPrompt, setRiskPrompt] = useState(null);
+  const [reference, setReference] = useState(null); // { price, address }
   const seededFor = useRef(null);
   const priceTouched = useRef(false);
 
@@ -59,7 +72,25 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pickedPrice]);
 
+  // Market price from Jupiter (aggregated across all Solana venues): Manifest books alone are
+  // often too thin to say what the market price is.
+  useEffect(() => {
+    if (!market?.address) return undefined;
+    let live = true;
+    const load = () => getJSON(`/api/markets/${market.address}/reference`)
+      .then(r => live && setReference({ price: r.price, address: market.address }))
+      .catch(() => {});
+    setReference(null);
+    load();
+    const t = setInterval(load, REFERENCE_REFRESH_MS);
+    return () => { live = false; clearInterval(t); };
+  }, [market?.address]);
+
   const p = Number(price), a = Number(amount);
+  const refPrice = reference && reference.address === market?.address ? reference.price : undefined;
+  const off = adverseDeviation(side, p, refPrice);
+  const risky = off != null && off > WARN_DEVIATION;
+  const overpay = risky && a > 0 ? Math.abs(p - refPrice) * a : null;
   const total = p > 0 && a > 0 ? p * a : 0;
 
   const available = useMemo(() => {
@@ -92,18 +123,42 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
   const crosses = p > 0 && book && (side === 'buy' ? book.bestAsk && p >= book.bestAsk : book.bestBid && p <= book.bestBid);
   const insufficient = available != null && (side === 'buy' ? total > available + 1e-12 : a > available + 1e-12);
 
-  async function prepare() {
+  async function prepare(acknowledgePriceRisk) {
     return postJSON('/api/orders/prepare', {
-      wallet: publicKey.toBase58(), market: market.address, side, price, size: amount, postOnly,
+      wallet: publicKey.toBase58(), market: market.address, side, price, size: amount, postOnly, acknowledgePriceRisk,
     });
+  }
+
+  const confirmRisk = (detail) => new Promise(resolve => setRiskPrompt({ resolve, detail }))
+    .finally(() => setRiskPrompt(null));
+
+  /** Prepare, asking for explicit consent if the price is far through the market. */
+  async function prepareChecked() {
+    let ack = false;
+    if (risky) {
+      if (!await confirmRisk(null)) return null;
+      ack = true;
+      setBusy('Preparing…');
+    }
+    try {
+      return await prepare(ack);
+    } catch (err) {
+      // The backend's own market price disagreed with ours (it moved): ask with its numbers.
+      if (err.code !== 'PRICE_DEVIATION') throw err;
+      setBusy(null);
+      if (!await confirmRisk(err.message)) return null;
+      setBusy('Preparing…');
+      return prepare(true);
+    }
   }
 
   async function submit() {
     if (!publicKey) return setVisible(true);
     if (!(p > 0) || !(a > 0)) return toast({ kind: 'error', title: 'Enter a price and amount' });
-    setBusy('Preparing…');
+    setBusy(risky ? null : 'Preparing…');
     try {
-      let prepared = await prepare();
+      let prepared = await prepareChecked();
+      if (!prepared) return;
       if (prepared.step === 'setup') {
         setBusy(null);
         const ok = await new Promise(resolve => setSetupPrompt({ resolve, summary: prepared.summary }));
@@ -113,7 +168,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
         const setup = await signAndSubmit(prepared, signAllTransactions);
         toast({ kind: 'success', title: 'Instant payouts enabled', link: explorerTx(setup.signature) });
         setBusy('Preparing…');
-        prepared = await prepare();
+        prepared = await prepare(true); // any price warning was already confirmed above
       }
       setBusy('Approve in your wallet…');
       const res = await signAndSubmit(prepared, signAllTransactions);
@@ -163,6 +218,19 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
       </div>
       <Field label="Total" unit={quote.symbol} value={total ? toInputString(total, quote.decimals) : ''} onChange={setTotal} />
 
+      {risky && (
+        <div className="of-note danger" role="alert">
+          <strong>⚠ {(off * 100).toFixed(1)}% {side === 'buy' ? 'above' : 'below'} the market price</strong> ({formatPrice(refPrice)} {quote.symbol}).
+          {' '}This order will likely fill right away at your price
+          {overpay ? <>, costing about <strong>{formatAmount(overpay)} {quote.symbol}</strong> more than the market</> : null}.
+        </div>
+      )}
+      {!risky && off != null && off < -SLOW_FILL_DEVIATION && (
+        <div className="of-note">{(-off * 100).toFixed(0)}% {side === 'buy' ? 'below' : 'above'} the market price, so it may take a long time to fill.</div>
+      )}
+      {refPrice === null && p > 0 && (
+        <div className="of-note">No reliable market price for this token. Double-check your price before placing.</div>
+      )}
       {crosses && !postOnly && (
         <div className="of-note warn">This price crosses the book, so part or all of it will fill immediately.</div>
       )}
@@ -182,10 +250,42 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
       <dl className="of-summary">
         <div><dt>{side === 'buy' ? 'You pay' : 'You sell'}</dt><dd className="num">{side === 'buy' ? `${formatAmount(total)} ${quote.symbol}` : `${formatAmount(a || 0)} ${base.symbol}`}</dd></div>
         <div><dt>You receive when filled</dt><dd className="num">{side === 'buy' ? `${formatAmount(a || 0)} ${base.symbol}` : `${formatAmount(total)} ${quote.symbol}`}</dd></div>
+        <div><dt>Market price</dt><dd className="num" title="Jupiter's price across all Solana venues">{refPrice ? `${formatPrice(refPrice)} ${quote.symbol}` : '—'}</dd></div>
         <div><dt>Trading fee</dt><dd>0% <span className="muted">(Manifest)</span></dd></div>
         <div><dt>Payout</dt><dd>Automatic, straight to your wallet</dd></div>
       </dl>
+      <p className="legal-links">
+        <span>By trading you agree to the</span>
+        <Link to="/terms">Terms</Link>
+        <Link to="/privacy">Privacy</Link>
+      </p>
 
+      {riskPrompt && (
+        <Modal
+          title="Price far from market"
+          danger
+          onClose={() => riskPrompt.resolve(false)}
+          actions={(
+            <>
+              <button type="button" className="btn primary" onClick={() => riskPrompt.resolve(false)}>Change price</button>
+              <button type="button" className="btn danger" onClick={() => riskPrompt.resolve(true)}>Place anyway</button>
+            </>
+          )}
+        >
+          {riskPrompt.detail ? <p>{riskPrompt.detail}</p> : (
+            <p>
+              You are {side === 'buy' ? 'buying' : 'selling'} at <strong>{price} {quote.symbol}</strong>,{' '}
+              <strong className="danger-text">{(off * 100).toFixed(1)}% {side === 'buy' ? 'above' : 'below'}</strong> the
+              market price of {formatPrice(refPrice)} {quote.symbol}.
+            </p>
+          )}
+          <p>
+            {side === 'buy' ? 'Sellers' : 'Buyers'} will happily fill this at your price, so it will likely execute right away
+            {overpay ? <> and cost you about <strong>{formatAmount(overpay)} {quote.symbol}</strong> compared with the market</> : null}.
+            This can&rsquo;t be undone once filled.
+          </p>
+        </Modal>
+      )}
       {setupPrompt && (
         <Modal
           title="One-time refundable deposit"

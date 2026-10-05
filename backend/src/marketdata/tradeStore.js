@@ -34,18 +34,14 @@ export class TradeStore extends EventEmitter {
         setInterval(() => this.save(), SAVE_EVERY_MS).unref();
     }
 
-    /** Record a fill from ManifestFillFeed. */
-    addFill(fill) {
-        const s = this.markets.summary(fill.market);
-        if (!s || fill.baseAtoms === 0n) return;
-        const size = Number(fill.baseAtoms) / 10 ** s.baseDecimals;
-        const quote = Number(fill.quoteAtoms) / 10 ** s.quoteDecimals;
-        const price = quote / size;
-        if (!(price > 0)) return;
+    /** A trade inferred from market snapshots: { price, size, quote, side } (taker side). */
+    addTrade(market, { price, size, quote, side }, time = Date.now()) {
+        if (!this.markets.summary(market) || !(price > 0) || !(size > 0)) return;
         // Dust fills (fractions of a cent hitting stale orders far from the market) would put
         // absurd wicks on the chart and the 24h high/low.
-        if (quote < this.minQuote(fill.market)) return;
-        const trade = { time: fill.time, price, size, side: fill.takerIsBuy ? 'buy' : 'sell', signature: fill.signature };
+        if (quote < this.minQuote(market)) return;
+        const fill = { market, time };
+        const trade = { time, price, size, side };
 
         let list = this.trades.get(fill.market);
         if (!list) this.trades.set(fill.market, (list = []));

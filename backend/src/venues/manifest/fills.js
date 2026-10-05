@@ -1,10 +1,9 @@
-// Live Manifest fills from a logs subscription (no per-transaction fetches).
-// Manifest writes each fill as a `Program data:` log line holding a FillLog.
-import { EventEmitter } from 'events';
+// Parsing of Manifest transaction logs: FillLog events (`Program data:` lines) and the sequence
+// numbers a batch update returns. Used on transactions we send ourselves; live trades are no
+// longer streamed from logs (see inferFills.js for why).
 import bs58 from 'bs58';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import { FillLog } from '@bonasa-tech/manifest-sdk';
-import { connection } from '../../solana.js';
 import { MANIFEST_PROGRAM_ID } from './markets.js';
 
 const PROGRAM = MANIFEST_PROGRAM_ID.toBase58();
@@ -72,15 +71,3 @@ export function parseBatchUpdateReturn(logs) {
 }
 
 /** Emits 'fill' for every Manifest fill seen on-chain, with `signature`, `slot` and `time` (ms). */
-export class ManifestFillFeed extends EventEmitter {
-    start() {
-        this.subscriptionId = connection.onLogs(MANIFEST_PROGRAM_ID, (result, ctx) => {
-            if (result.err) return;
-            const time = Date.now();
-            for (const fill of parseFills(result.logs)) {
-                this.emit('fill', { ...fill, signature: result.signature, slot: ctx.slot, time });
-            }
-        }, 'confirmed');
-        console.log('Manifest: subscribed to fill logs');
-    }
-}

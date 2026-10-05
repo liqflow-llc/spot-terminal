@@ -28,8 +28,12 @@ Users never deposit, withdraw or wrap SOL by hand.
 ## Layout
 
 - `backend/` Node API (Express, ESM)
-  - `venues/manifest/markets.js` market scan, live websocket books, 24h volume from on-chain counters
-  - `venues/manifest/fills.js` live fills from a logs subscription; batch-update return data
+  - `venues/manifest/markets.js` incremental market scan (Helius getProgramAccountsV2), polled
+    live books (one getMultipleAccounts per tick for all viewed markets), 24h volume from on-chain
+    counters. No RPC websockets: Helius bills streaming at 20 credits/MB, and Manifest's log
+    stream alone is ~0.9 GB/hour (it exhausted the plan on Oct 5, 2026).
+  - `venues/manifest/inferFills.js` trades inferred from successive market snapshots
+  - `venues/manifest/fills.js` FillLog / batch-update return-data parsing for our own transactions
   - `venues/manifest/instructions.js` core-program instructions and exact price/claim math
   - `marketdata/` trades, 1m candles (GeckoTerminal backfill), aggregated books
   - `orders/` order service (prepare/verify/submit/cancel), order store, keeper

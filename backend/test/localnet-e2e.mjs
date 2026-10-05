@@ -15,6 +15,7 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spot-e2e-'));
 process.env.RPC_URL = process.env.RPC_URL || 'http://127.0.0.1:8899';
 process.env.WS_URL = process.env.WS_URL || 'ws://127.0.0.1:8900';
 process.env.DATA_DIR = dataDir;
+process.env.WATCH_POLL_MS = process.env.WATCH_POLL_MS || '2000'; // keeper polling; production uses 15s
 
 const { Keypair, LAMPORTS_PER_SOL, PublicKey, Transaction, sendAndConfirmTransaction } = await import('@solana/web3.js');
 const spl = await import('@solana/spl-token');
@@ -88,6 +89,8 @@ const service = new OrderService({ markets, store, keeperPubkey: keeper.publicKe
 const keeperSvc = new Keeper({ markets, store, keypair: keeper });
 service.onPlaced = (id) => keeperSvc.track(id);
 keeperSvc.start();
+const inferred = []; // trades the market poller inferred from snapshots
+markets.on('fills', (address, fills) => fills.forEach(f => inferred.push({ address, ...f })));
 
 /** What a wallet does: sign every transaction it is handed, then send them back. */
 async function signAndSubmit(prepared, signer = maker) {
@@ -164,6 +167,9 @@ await test('Sell order fully filled → proceeds land in wallet automatically', 
     const gained = await tokenBalance(maker.publicKey, QUOTE) - quoteBefore;
     log('claim tx', claimed.claimSignature.slice(0, 16) + '…', 'wallet +', gained, 'quote atoms');
     assert.equal(gained, 25_000_000n - 10n, '25 QUOTE (minus 10-atom rounding slack) returned to wallet');
+    const seen = inferred.filter(f => f.address === mBQ);
+    log('inferred trades:', JSON.stringify(seen));
+    assert.ok(seen.some(f => f.side === 'buy' && Math.abs(f.price - 2.5) < 1e-9 && Math.abs(f.size - 10) < 1e-9), 'the fill was inferred from snapshots (buy 10 @ 2.5)');
     log('dust left in market:', await seatBalance(mBQ, false), 'quote atoms');
 });
 
@@ -304,6 +310,18 @@ await test('Anyone can create a market for a token that has none, then trade it'
     const order = await placeOrder({ market: res.market, side: 'sell', price: '0.01', size: '100' });
     assert.equal(order.status, 'open', 'first order rests on the new market');
     await assert.rejects(service.prepareCreateMarket({ wallet, baseMint: maker.publicKey.toBase58(), quoteMint: NATIVE.toBase58() }), /not a token mint/);
+});
+
+await test('Orders priced >5% through the market need explicit consent', async () => {
+    const guarded = new OrderService({ markets, store, keeperPubkey: keeper.publicKey, referencePrice: async () => 1 });
+    const wallet = maker.publicKey.toBase58();
+    await assert.rejects(guarded.prepareOrder({ wallet, market: mBQ, side: 'buy', price: '1.06', size: '1' }), e => e.code === 'PRICE_DEVIATION');
+    await assert.rejects(guarded.prepareOrder({ wallet, market: mBQ, side: 'sell', price: '0.94', size: '1' }), e => e.code === 'PRICE_DEVIATION');
+    // Within 5%, or on the safe side, or acknowledged: allowed.
+    for (const params of [{ side: 'buy', price: '1.04' }, { side: 'buy', price: '0.5' }, { side: 'sell', price: '3' }, { side: 'buy', price: '1.5', acknowledgePriceRisk: true }]) {
+        const prepared = await guarded.prepareOrder({ wallet, market: mBQ, size: '1', ...params });
+        assert.ok(['sign', 'setup'].includes(prepared.step), JSON.stringify(params));
+    }
 });
 
 await sleep(1000);

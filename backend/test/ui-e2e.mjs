@@ -84,6 +84,12 @@ try {
         tx.partialSign(user);
         return tx.serialize({ requireAllSignatures: false }).toString('base64');
     });
+    await page.evaluateOnNewDocument(() => {
+        const realFetch = window.fetch.bind(window);
+        window.fetch = (url, opts) => (window.__refStub != null && String(url).endsWith('/reference')
+            ? Promise.resolve(new Response(JSON.stringify({ price: window.__refStub, source: 'Jupiter', at: Date.now() }), { headers: { 'Content-Type': 'application/json' } }))
+            : realFetch(url, opts));
+    });
     await page.evaluateOnNewDocument((address, pubkeyBytes) => {
         const b64ToBytes = (b64) => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
         const bytesToB64 = (bytes) => btoa(String.fromCharCode(...bytes));
@@ -208,6 +214,35 @@ try {
     if (await page.evaluate(() => window.__signCount) !== 3) throw new Error('refund should be exactly one approval');
     await shot('3-refunded');
 
+    step('A buy priced far above the market gets a strong warning, and can be backed out of');
+    const stub = await page.evaluateOnNewDocument(() => { window.__refStub = 1; });
+    await page.goto(`${base}/trade/${market}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.selector-btn .pair-name', { timeout: 20000 });
+    await clickText('.of-side', 'Buy');
+    await setField('Price', '2');
+    await setField('Amount', '1');
+    await page.waitForFunction(() => document.querySelector('.of-note.danger')?.textContent.includes('above the market price'), { timeout: 40000 });
+    await clickText('.of-submit', 'Buy');
+    await page.waitForFunction(() => document.querySelector('.modal.danger')?.textContent.includes('100.0% above'), { timeout: 10000 });
+    await shot('4a-price-warning');
+    const before = await page.evaluate(() => window.__signCount);
+    await clickText('.modal button', 'Change price');
+    await sleep(800);
+    if (await page.$('.modal')) throw new Error('warning dialog did not close');
+    if (await page.evaluate(() => window.__signCount) !== before) throw new Error('backing out must not ask the wallet');
+    await page.removeScriptToEvaluateOnNewDocument(stub.identifier);
+    await page.evaluate(() => { window.__refStub = null; });
+
+    step('Starring a market puts it at the top of the list');
+    await page.click('.market-header > .star');
+    await page.click('.selector-btn');
+    await page.waitForSelector('.selector-row', { timeout: 20000 });
+    await page.waitForFunction((m) => document.querySelector('.selector-row')?.classList.contains('fav'), { timeout: 10000 }, market);
+    const starredStored = await page.evaluate(() => JSON.parse(localStorage.getItem('spot.favoriteMarkets') || '[]'));
+    if (starredStored[0] !== market) throw new Error(`favorite not stored: ${starredStored}`);
+    await shot('4b-favorite');
+    await page.keyboard.press('Escape');
+
     step('Sorting the market list by a column');
     await page.goto(`${base}/trade/${market}`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.selector-btn .pair-name', { timeout: 20000 });
@@ -220,6 +255,9 @@ try {
     await shot('4-sorted');
 
     step('Creating a market for a token that has none');
+    await page.keyboard.press('Escape');
+    await page.click('.selector-btn');
+    await page.waitForSelector('.selector-search');
     await page.type('.selector-search', NEW_TOKEN.toBase58());
     await clickText('.selector-create button', '/SOL');
     await page.waitForFunction(() => document.querySelector('.modal')?.textContent.includes('SOL (network rent'), { timeout: 30000 });
@@ -245,6 +283,13 @@ try {
     const priceBox = await page.evaluate(() => [...document.querySelectorAll('.of-field')].find(f => f.textContent.includes('Price')).querySelector('input').value);
     if (priceBox !== '') throw new Error(`price box kept the previous market's price (${priceBox})`);
     await shot('6-new-market');
+
+    step('Terms and Privacy pages render');
+    for (const [path, heading] of [['/terms', 'Terms of Service'], ['/privacy', 'Privacy Policy']]) {
+        await page.goto(`${base}${path}`, { waitUntil: 'domcontentloaded' });
+        await page.waitForFunction((h) => document.querySelector('.legal-main h1')?.textContent === h, { timeout: 10000 }, heading);
+    }
+    await shot('7-privacy');
     if (errors.length) console.log('  page errors:', errors.slice(0, 5));
     console.log('\nUI test passed');
 } catch (err) {
