@@ -45,6 +45,8 @@ for (const owner of [user, taker]) {
 const { ixs, signers } = await Market.setupIxs(connection, BASE, QUOTE, taker.publicKey);
 await sendAndConfirmTransaction(connection, new Transaction().add(...ixs), [taker, ...signers]);
 const market = signers[0].publicKey.toBase58();
+const NEW_TOKEN = await spl.createMint(connection, taker, taker.publicKey, null, 9); // has no market yet
+await spl.mintTo(connection, taker, NEW_TOKEN, (await spl.getOrCreateAssociatedTokenAccount(connection, taker, NEW_TOKEN, user.publicKey)).address, taker, 1_000n * 10n ** 9n);
 console.log('  market', market, 'user', user.publicKey.toBase58());
 
 // ---------- backend on localnet ----------
@@ -205,6 +207,44 @@ try {
     await page.waitForFunction(() => document.querySelector('.account-card')?.textContent.includes('Nothing to refund'), { timeout: 20000 });
     if (await page.evaluate(() => window.__signCount) !== 3) throw new Error('refund should be exactly one approval');
     await shot('3-refunded');
+
+    step('Sorting the market list by a column');
+    await page.goto(`${base}/trade/${market}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.selector-btn .pair-name', { timeout: 20000 });
+    await page.click('.selector-btn');
+    await page.waitForSelector('.selector-row', { timeout: 20000 });
+    await clickText('.selector-sort', 'Pair');
+    await page.waitForFunction(() => document.querySelector('.selector-sort.active')?.textContent.includes('▲'), { timeout: 5000 });
+    await clickText('.selector-sort', 'Pair');
+    await page.waitForFunction(() => document.querySelector('.selector-sort.active')?.textContent.includes('▼'), { timeout: 5000 });
+    await shot('4-sorted');
+
+    step('Creating a market for a token that has none');
+    await page.type('.selector-search', NEW_TOKEN.toBase58());
+    await clickText('.selector-create button', '/SOL');
+    await page.waitForFunction(() => document.querySelector('.modal')?.textContent.includes('SOL (network rent'), { timeout: 30000 });
+    await shot('5-create-market');
+    await clickText('.modal button', 'Create market');
+    await page.waitForFunction(() => [...document.querySelectorAll('.toast-title')].some(t => t.textContent.includes('market created')), { timeout: 60000 });
+    await page.waitForFunction((m) => location.pathname.startsWith('/trade/') && !location.pathname.endsWith(m), { timeout: 20000 }, market);
+    const created = page.url().split('/trade/')[1];
+    const info = await (await fetch(`${base}/api/markets/${created}`)).json();
+    if (info.base?.mint !== NEW_TOKEN.toBase58() || info.quote?.symbol !== 'SOL') throw new Error(`unexpected market ${JSON.stringify(info).slice(0, 200)}`);
+    console.log(`  created ${info.symbol} market ${created}`);
+    await page.waitForFunction(() => document.querySelector('.selector-btn .pair-name')?.textContent.endsWith('/SOL'), { timeout: 20000 });
+    // The chart switches to the new market (its legend shows the new symbol).
+    const chartFrame = () => page.frames().find(f => f.url().startsWith('blob:'));
+    const end = Date.now() + 30000;
+    let legend = '';
+    while (Date.now() < end) {
+        legend = await chartFrame()?.evaluate(() => document.body.innerText).catch(() => '') || '';
+        if (legend.includes('/ SOL')) break;
+        await sleep(500);
+    }
+    if (!legend.includes('/ SOL')) throw new Error(`chart did not switch to the new market (chart shows: ${legend.split('\n').filter(l => /Manifest|\//.test(l)).slice(0, 6).join(' | ')}; frames: ${page.frames().map(f => f.url().slice(0, 30))})`);
+    const priceBox = await page.evaluate(() => [...document.querySelectorAll('.of-field')].find(f => f.textContent.includes('Price')).querySelector('input').value);
+    if (priceBox !== '') throw new Error(`price box kept the previous market's price (${priceBox})`);
+    await shot('6-new-market');
     if (errors.length) console.log('  page errors:', errors.slice(0, 5));
     console.log('\nUI test passed');
 } catch (err) {

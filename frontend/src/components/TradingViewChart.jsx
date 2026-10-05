@@ -53,8 +53,11 @@ export default function TradingViewChart({ address, onTrade }) {
   const widgetRef = useRef(null);
   const readyRef = useRef(false);
   const onTradeRef = useRef(onTrade);
+  const addressRef = useRef(address); // the market we should show
+  const shownRef = useRef(null);      // the market the chart was last told to show
   const [error, setError] = useState(null);
   onTradeRef.current = onTrade;
+  addressRef.current = address;
 
   // Create the widget once; market changes are applied with setSymbol below.
   useEffect(() => {
@@ -66,7 +69,7 @@ export default function TradingViewChart({ address, onTrade }) {
         container: containerRef.current,
         library_path: LIBRARY_PATH,
         datafeed,
-        symbol: address,
+        symbol: (shownRef.current = addressRef.current),
         interval: '15',
         locale: 'en',
         theme: 'dark',
@@ -78,7 +81,11 @@ export default function TradingViewChart({ address, onTrade }) {
         loading_screen: { backgroundColor: BG, foregroundColor: '#4c8dff' },
       });
       widgetRef.current = widget;
-      widget.onChartReady(() => { readyRef.current = true; });
+      widget.onChartReady(() => {
+        readyRef.current = true;
+        // The market may have changed while the first chart was still loading.
+        if (shownRef.current !== addressRef.current) widget.activeChart().setSymbol((shownRef.current = addressRef.current));
+      });
     }).catch(err => !cancelled && setError(err.message));
     return () => {
       cancelled = true;
@@ -91,7 +98,7 @@ export default function TradingViewChart({ address, onTrade }) {
 
   useEffect(() => {
     const widget = widgetRef.current;
-    if (widget && readyRef.current) widget.activeChart().setSymbol(address);
+    if (widget && readyRef.current && shownRef.current !== address) widget.activeChart().setSymbol((shownRef.current = address));
   }, [address]);
 
   return (

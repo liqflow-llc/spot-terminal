@@ -245,6 +245,8 @@ await test('Cancelling one order keeps another order\'s partial proceeds for its
     const cancel = await service.prepareCancel({ wallet: maker.publicKey.toBase58(), orderId: b.id });
     await signAndSubmit(cancel);
     log('after cancelling B, A\'s partial proceeds still in market:', await seatBalance(mBQ, false), 'quote atoms');
+    await sleep(2500); // give the keeper a chance to (wrongly) treat A's proceeds as B's fill
+    assert.equal(store.get(b.id).status, 'cancelled', 'B stays cancelled; A\'s proceeds are not mistaken for B\'s');
     await swap(mBQ, { baseIn: false, inAtoms: 10_000_000n }); // fills the rest of A
     await waitFor(() => store.get(a.id).status === 'claimed', 'claim for A after B was cancelled');
     const gained = await tokenBalance(maker.publicKey, QUOTE) - quoteBefore;
@@ -281,9 +283,27 @@ await test('Setup deposit is refundable; accounts backing open orders are kept',
 
     // Its account is free now: refund it too, and the next order asks for setup again.
     await signAndSubmit(await service.prepareClosePayout({ wallet }));
-    assert.equal((await service.payoutAccounts(wallet)).accounts.length, 0, 'all payout accounts closed');
+    const left = await service.payoutAccounts(wallet);
+    assert.equal(left.accounts.length, 0, `all payout accounts closed (left: ${JSON.stringify(left.accounts)}; orders: ${JSON.stringify(store.forWallet(wallet).map(o => [o.status, o.nonce.slice(0, 6)]))})`);
     const next = await service.prepareOrder({ wallet, market: mBQ, side: 'buy', price: '1', size: '1' });
     assert.equal(next.step, 'setup', 'setup required again after the refund');
+});
+
+await test('Anyone can create a market for a token that has none, then trade it', async () => {
+    const wallet = maker.publicKey.toBase58();
+    const TOKEN = await spl.createMint(connection, taker, taker.publicKey, null, 9);
+    await spl.mintTo(connection, taker, TOKEN, (await spl.getOrCreateAssociatedTokenAccount(connection, taker, TOKEN, maker.publicKey)).address, taker, 1_000n * 10n ** 9n);
+    const prepared = await service.prepareCreateMarket({ wallet, baseMint: TOKEN.toBase58(), quoteMint: NATIVE.toBase58() });
+    assert.equal(prepared.step, 'sign');
+    log('create cost', prepared.summary.costSol, 'SOL');
+    assert.ok(prepared.summary.costSol > 0 && prepared.summary.costSol < 0.05, 'cost is small rent');
+    const res = await signAndSubmit(prepared);
+    assert.equal(res.market, prepared.market);
+    const again = await service.prepareCreateMarket({ wallet, baseMint: TOKEN.toBase58(), quoteMint: NATIVE.toBase58() });
+    assert.deepEqual(again, { step: 'exists', market: res.market }, 'no duplicate market');
+    const order = await placeOrder({ market: res.market, side: 'sell', price: '0.01', size: '100' });
+    assert.equal(order.status, 'open', 'first order rests on the new market');
+    await assert.rejects(service.prepareCreateMarket({ wallet, baseMint: maker.publicKey.toBase58(), quoteMint: NATIVE.toBase58() }), /not a token mint/);
 });
 
 await sleep(1000);

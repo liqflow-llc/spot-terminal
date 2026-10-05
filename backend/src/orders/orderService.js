@@ -17,7 +17,7 @@ import {
     SystemProgram, Transaction, VersionedTransaction,
 } from '@solana/web3.js';
 import { Market } from '@bonasa-tech/manifest-sdk';
-import { getAssociatedTokenAddressSync, NATIVE_MINT } from '@solana/spl-token';
+import { getAssociatedTokenAddressSync, NATIVE_MINT, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { getGlobalAddress } from '@bonasa-tech/manifest-sdk';
 import { connection } from '../solana.js';
 import {
@@ -25,6 +25,7 @@ import {
     orderEconomics, quoteForBase, unwrapSolIx, withdrawIx, wrapSolIxs,
 } from '../venues/manifest/instructions.js';
 import { parseBatchUpdateReturn } from '../venues/manifest/fills.js';
+import { claimReservations } from './orderStore.js';
 
 const PLACE_CU = 400_000;
 const CLAIM_CU = 120_000;
@@ -32,6 +33,7 @@ const CANCEL_CU = 300_000;
 const PRIORITY_MICROLAMPORTS = 50_000;
 const PREPARE_TTL_MS = 3 * 60 * 1000;
 const NONCES_PER_SETUP = 2;
+const CREATE_MARKET_CU = 100_000;
 
 export class UserError extends Error {
     constructor(message) {
@@ -58,6 +60,14 @@ function parseWallet(wallet) {
         return new PublicKey(wallet);
     } catch {
         throw new UserError('Invalid wallet address');
+    }
+}
+
+function parseMint(mint) {
+    try {
+        return new PublicKey(mint);
+    } catch {
+        throw new UserError('Invalid token address');
     }
 }
 
@@ -365,6 +375,12 @@ export class OrderService {
             return { ok: true, signature };
         }
 
+        if (pending.kind === 'createMarket') {
+            const signature = await this.send(txs[0], pending);
+            await this.markets.refresh(pending.market);
+            return { ok: true, signature, market: pending.market };
+        }
+
         if (pending.kind === 'closePayout') {
             const busy = this.store.noncesInUse(pending.wallet);
             if (pending.nonceAddresses.some(a => busy.has(a))) throw new UserError('An order started using these payout accounts, please try the refund again.');
@@ -411,6 +427,61 @@ export class OrderService {
         });
         this.onPlaced?.(order.id);
         return { ok: true, signature, orderId: order.id, sequenceNumber };
+    }
+
+    // ---------- new markets ----------
+
+    /**
+     * Create a Manifest market for base/quote, paid for by the wallet. Manifest markets are
+     * permissionless; the market account's keypair is generated here and signs before the wallet.
+     */
+    async prepareCreateMarket({ wallet, baseMint, quoteMint }) {
+        const walletPk = parseWallet(wallet);
+        const base = parseMint(baseMint), quote = parseMint(quoteMint);
+        if (base.equals(quote)) throw new UserError('Pick two different tokens');
+        const existing = this.markets.marketsForPair(base.toBase58(), quote.toBase58()).find(m => m.baseMint === base.toBase58());
+        if (existing) return { step: 'exists', market: existing.address };
+
+        const [baseInfo, quoteInfo, walletInfo] = await connection.getMultipleAccountsInfo([base, quote, walletPk], 'confirmed');
+        for (const info of [baseInfo, quoteInfo]) {
+            if (!info || !(info.owner.equals(TOKEN_PROGRAM_ID) || info.owner.equals(TOKEN_2022_PROGRAM_ID))) {
+                throw new UserError('That address is not a token mint');
+            }
+        }
+        const { ixs, signers } = await Market.setupIxs(connection, base, quote, walletPk);
+        const marketKeypair = signers[0];
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+        const tx = new Transaction({ feePayer: walletPk, blockhash, lastValidBlockHeight });
+        tx.add(...priorityIxs(CREATE_MARKET_CU), ...ixs);
+        tx.partialSign(marketKeypair);
+
+        // Exact cost (rent for the market and its two vaults, plus fees) from the simulation.
+        const sim = await connection.simulateTransaction(new VersionedTransaction(tx.compileMessage()), {
+            sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed',
+            accounts: { encoding: 'base64', addresses: [walletPk.toBase58()] },
+        });
+        if (sim.value.err) {
+            const hint = (sim.value.logs || []).filter(l => /Error|error|insufficient|failed/.test(l)).slice(-3).join(' | ');
+            console.warn('Create market simulation failed:', JSON.stringify(sim.value.err), hint);
+            throw new UserError(walletInfo && walletInfo.lamports < 10_000_000
+                ? 'Not enough SOL in your wallet to create a market.'
+                : `Creating the market would fail on-chain: ${hint || JSON.stringify(sim.value.err)}`);
+        }
+        const costLamports = (walletInfo?.lamports ?? 0) - (sim.value.accounts?.[0]?.lamports ?? walletInfo?.lamports ?? 0);
+
+        const id = crypto.randomUUID();
+        const market = marketKeypair.publicKey.toBase58();
+        this.pending.set(id, {
+            kind: 'createMarket', wallet: walletPk.toBase58(), createdAt: Date.now(),
+            messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight, market,
+        });
+        return {
+            step: 'sign',
+            id,
+            market,
+            transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')],
+            summary: { title: 'Create market', detail: 'Creates a new Manifest market.', costSol: costLamports / 1e9 },
+        };
     }
 
     // ---------- payout accounts (durable nonces) ----------
@@ -538,7 +609,7 @@ export class OrderService {
         }
         if (!market.hasSeat(walletPk)) return false;
         // Leave behind what other open orders' pre-signed claims will need, or they'd come up short.
-        const reserved = this.claimReservations(walletPk.toBase58(), ctx.marketAddress, market, excludeOrderId);
+        const reserved = claimReservations(this.store, walletPk.toBase58(), ctx.marketAddress, market, excludeOrderId);
         const sub = (a, b) => (a > b ? a - b : 0n);
         const base = sub(BigInt(market.getWithdrawableBalanceAtoms(walletPk, true).toString()), reserved.base);
         const quote = sub(BigInt(market.getWithdrawableBalanceAtoms(walletPk, false).toString()), reserved.quote);
@@ -551,25 +622,6 @@ export class OrderService {
         return true;
     }
 }
-
-/**
- * Proceeds already credited to this wallet's other open orders on `marketAddress` (their partial
- * fills). Those stay in the market so each order's claim can still withdraw its full amount.
- */
-OrderService.prototype.claimReservations = function claimReservations(wallet, marketAddress, market, excludeOrderId) {
-    const remaining = new Map([...market.bids(), ...market.asks()].map(o => [o.sequenceNumber.toString(), BigInt(o.numBaseAtoms.toString())]));
-    const out = { base: 0n, quote: 0n };
-    for (const o of this.store.active()) {
-        if (o.wallet !== wallet || o.market !== marketAddress || o.id === excludeOrderId) continue;
-        const total = BigInt(o.baseAtoms);
-        const left = o.sequenceNumber && remaining.has(o.sequenceNumber) ? remaining.get(o.sequenceNumber) : 0n;
-        const filled = total > left ? total - left : 0n;
-        if (filled === 0n) continue;
-        if (o.isBid) out.base += filled;
-        else out.quote += left === 0n ? BigInt(o.claimAtoms) : quoteForBase(o.mantissa, o.exponent, filled, false);
-    }
-    return out;
-};
 
 function formatAtoms(atoms, decimals) {
     return (Number(atoms) / 10 ** decimals).toLocaleString('en-US', { maximumFractionDigits: Math.min(decimals, 9) });

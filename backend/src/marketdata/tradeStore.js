@@ -12,6 +12,7 @@ const SAVE_EVERY_MS = 5 * 60 * 1000;
 const FILE = path.join(config.dataDir, 'candles-1m.json');
 const GT_API = 'https://api.geckoterminal.com/api/v2/networks/solana/pools';
 const GT_CACHE_MS = 5 * 60 * 1000;
+const GECKO_WAIT_MS = 3000;
 
 // TradingView resolution -> [GeckoTerminal timeframe, aggregate, seconds]
 const RESOLUTIONS = {
@@ -107,12 +108,13 @@ export class TradeStore extends EventEmitter {
         // Use GeckoTerminal only for the period before our own data begins.
         let history = [];
         if (from < ownStart) {
-            try {
-                history = (await this.geckoBars(market, resolution, Math.min(to, ownStart)))
-                    .filter(b => b.time / 1000 >= from && b.time / 1000 < Math.min(to, ownStart));
-            } catch (err) {
-                console.error(`GeckoTerminal OHLCV failed for ${market}:`, err.message);
-            }
+            // GeckoTerminal is queued and rate limited (a 429 pauses it for a minute), so don't hold
+            // the chart hostage: answer with our own bars if it's slow. The fetch carries on and is
+            // cached, so the next load of this chart gets the history.
+            const fetching = this.geckoBars(market, resolution, Math.min(to, ownStart));
+            fetching.catch(err => console.error(`GeckoTerminal OHLCV failed for ${market}:`, err.message));
+            const bars = await Promise.race([fetching.catch(() => []), new Promise(r => setTimeout(r, GECKO_WAIT_MS, null))]);
+            if (bars) history = bars.filter(b => b.time / 1000 >= from && b.time / 1000 < Math.min(to, ownStart));
         }
         return [...history, ...own];
     }

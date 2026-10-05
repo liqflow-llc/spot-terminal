@@ -201,7 +201,7 @@ export class TokenRegistry {
     }
 
     async fetchMintAccounts(mints) {
-        const result = await this.heliusRpcCall('getMultipleAccounts', [mints, { encoding: 'jsonParsed' }]);
+        const result = await this.heliusRpcCall('getMultipleAccounts', [mints, { encoding: 'jsonParsed', commitment: 'confirmed' }]);
         result.value.forEach((acc, i) => {
             const decimals = acc?.data?.parsed?.info?.decimals;
             if (!Number.isInteger(decimals)) return;

@@ -6,6 +6,7 @@ import fs from 'fs';
 import { Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import { connection } from '../solana.js';
 import { config } from '../config.js';
+import { claimReservations } from './orderStore.js';
 
 const SWEEP_MS = 20_000;
 const MAX_CLAIM_ATTEMPTS = 5;
@@ -82,9 +83,13 @@ export class Keeper {
             if (resting.has(order.sequenceNumber)) continue;
 
             const wallet = new PublicKey(order.wallet);
-            const free = market.hasSeat(wallet)
+            const balance = market.hasSeat(wallet)
                 ? BigInt(market.getWithdrawableBalanceAtoms(wallet, order.proceedsIsBase).toString())
                 : 0n;
+            // The seat may also hold the wallet's other orders' proceeds; those don't count as a
+            // fill of this one (e.g. right after the user cancelled it).
+            const reserved = claimReservations(this.store, order.wallet, marketAddress, market, order.id);
+            const free = balance - (order.proceedsIsBase ? reserved.base : reserved.quote);
             if (free >= BigInt(order.claimAtoms)) {
                 this.submitClaim(order);
             } else if (!order.missingSince) {
@@ -112,11 +117,14 @@ export class Keeper {
                 minContextSlot: order.placeSlot || 0,
             }, 'confirmed');
             if (res.value.err) throw new Error(JSON.stringify(res.value.err));
+            // Landed, so the nonce was unused: no cancel can have gone through first.
             this.store.update(order.id, { status: 'claimed', claimSignature: signature, claimedAt: Date.now() });
             console.log(`Keeper: claimed order ${order.id} -> ${signature}`);
         } catch (err) {
             const attempts = (order.claimAttempts || 0) + 1;
             console.error(`Keeper: claim for ${order.id} failed (attempt ${attempts}):`, err.message);
+            // The user cancelled meanwhile (which voids the claim): keep that outcome.
+            if (this.store.get(order.id)?.status !== 'claiming') return;
             this.store.update(order.id, {
                 status: attempts >= MAX_CLAIM_ATTEMPTS ? 'claim_failed' : 'open',
                 claimAttempts: attempts,

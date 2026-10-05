@@ -157,7 +157,9 @@ app.get('/api/config', (req, res) => {
 app.get('/api/markets', (req, res) => {
     const q = String(req.query.q || '').trim().toLowerCase();
     const limit = Math.min(500, Number(req.query.limit) || 200);
-    let list = markets.allSummaries().filter(s => s.bidCount + s.askCount > 0).map(marketView);
+    // Empty markets only show up when searched for by exact mint or address (e.g. one just created).
+    const exactHit = (s) => q && (s.baseMint === req.query.q || s.quoteMint === req.query.q || s.address === req.query.q);
+    let list = markets.allSummaries().filter(s => s.bidCount + s.askCount > 0 || exactHit(s)).map(marketView);
     if (q) list = list.filter(m => m.symbol.toLowerCase().includes(q) || m.base.mint === req.query.q || m.address === req.query.q);
     // Exact token matches first (so "JUP" finds JUP before JupSOL), then verified pairs with
     // real 24h activity.
@@ -314,8 +316,35 @@ const writeLimit = rateLimit('write', 30, 60_000);
 app.post('/api/orders/prepare', writeLimit, handle(body => orders.prepareOrder(body)));
 app.post('/api/orders/cancel', writeLimit, handle(body => orders.prepareCancel(body)));
 app.post('/api/orders/withdraw', writeLimit, handle(body => orders.prepareWithdraw(body)));
+app.post('/api/markets/create', writeLimit, handle(body => orders.prepareCreateMarket(body)));
 app.post('/api/payout-accounts/close', writeLimit, handle(body => orders.prepareClosePayout(body)));
 app.post('/api/tx/submit', writeLimit, handle(body => orders.submit(body)));
+// A token by mint, with its markets against the quotes we offer for new markets.
+const NEW_MARKET_QUOTES = [
+    { symbol: 'SOL', mint: 'So11111111111111111111111111111111111111112' },
+    { symbol: 'USDC', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' },
+];
+app.get('/api/tokens/:mint', rateLimit('tokens', 30, 60_000), async (req, res) => {
+    const mint = req.params.mint;
+    try {
+        new PublicKey(mint);
+    } catch {
+        return res.status(400).json({ error: 'Invalid token address' });
+    }
+    await registry.ensure([mint]);
+    // Asked for directly (e.g. a token minted minutes ago): look again even if a lookup failed recently.
+    if (!registry.hasDecimals(mint)) await registry.resolve([mint]);
+    if (!registry.hasDecimals(mint)) return res.status(404).json({ error: 'Token not found' });
+    res.set('Cache-Control', 'no-cache');
+    res.json({
+        token: registry.display(mint),
+        quotes: NEW_MARKET_QUOTES.filter(q => q.mint !== mint).map(q => ({
+            ...q,
+            market: markets.marketsForPair(mint, q.mint).find(s => s.baseMint === mint)?.address || null,
+        })),
+    });
+});
+
 app.get('/api/payout-accounts', rateLimit('account', 40, 60_000), async (req, res) => {
     try {
         res.set('Cache-Control', 'no-cache');

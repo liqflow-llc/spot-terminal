@@ -32,6 +32,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
   useEffect(() => {
     priceTouched.current = false;
     setAmount('');
+    setPrice(''); // re-seeded below from the new market's book, if it has one
   }, [market?.address]);
 
   // Default to the best price on your own side of the book (a resting order), once per market
