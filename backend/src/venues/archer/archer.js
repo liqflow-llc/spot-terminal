@@ -137,7 +137,7 @@ export class ArcherVenue extends EventEmitter {
             this.reconnectDelay = 1000;
             this.send({ op: 'subscribe', channels: ['mini_tickers'] });
             for (const address of this.subs.keys()) this.send({ op: 'subscribe', channels: ['orderbook'], market: address });
-            ping = setInterval(() => this.send({ op: 'ping' }), PING_MS);
+            ping = setInterval(() => this.send({ op: 'ping', ts: Date.now() }), PING_MS);
         });
         ws.on('message', (raw) => {
             let msg;
