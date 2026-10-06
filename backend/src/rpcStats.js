@@ -14,6 +14,9 @@ export function rpcFailed(method, err) {
     const msg = err?.message || String(err);
     if (/max usage|429/i.test(msg)) {
         log.error('rpc', /max usage/i.test(msg) ? 'OUT_OF_CREDITS' : 'rate_limited', { method, msg: msg.slice(0, 160) });
+    } else {
+        // Network blips etc. (web3.js also prints its own stack trace for these).
+        log.warn('rpc', 'request_failed', { method, msg: msg.slice(0, 160) });
     }
 }
 
