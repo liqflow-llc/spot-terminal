@@ -17,7 +17,7 @@ function format(area, event, fields) {
         let s;
         if (typeof v === 'string') s = v;
         else if (typeof v === 'number' || typeof v === 'boolean') s = String(v);
-        else if (v && typeof v === 'object' && !Array.isArray(v)) s = Object.entries(v).map(([a, b]) => `${a}:${b}`).join(',') || 'none';
+        else if (v && typeof v === 'object' && !Array.isArray(v)) s = Object.entries(v).map(([a, b]) => `${a}:${b && typeof b === 'object' ? JSON.stringify(b) : b}`).join(',') || 'none';
         else s = JSON.stringify(v);
         s = s.replace(/\s+/g, ' ').slice(0, 300);
         parts.push(`${k}=${/[\s"=]/.test(s) ? JSON.stringify(s) : s}`);
