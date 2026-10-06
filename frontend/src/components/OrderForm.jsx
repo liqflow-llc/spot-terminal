@@ -39,6 +39,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
   const [amount, setAmount] = useState('');
   const [postOnly, setPostOnly] = useState(false);
   const [expiry, setExpiry] = useState(''); // seconds, '' = good till cancelled
+  const [takeNow, setTakeNow] = useState(true); // fill via Jupiter first when it beats the limit
   const [busy, setBusy] = useState(null);
   const [setupPrompt, setSetupPrompt] = useState(null);
   const [riskPrompt, setRiskPrompt] = useState(null);
@@ -134,6 +135,9 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
   };
 
   // Warn when a limit order would execute immediately against the book.
+  // A limit through Jupiter's market price can be (partly) filled right away at a better price.
+  const jupiterCan = !postOnly && refPrice > 0 && p > 0 && (side === 'buy' ? p >= refPrice * 0.999 : p <= refPrice * 1.001);
+  const smart = jupiterCan && takeNow;
   const bestAsk = book?.manifestBestAsk ?? book?.bestAsk, bestBid = book?.manifestBestBid ?? book?.bestBid;
   const crosses = p > 0 && book && (side === 'buy' ? bestAsk && p >= bestAsk : bestBid && p <= bestBid);
   const insufficient = available != null && (side === 'buy' ? total > available + 1e-12 : a > available + 1e-12);
@@ -142,6 +146,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
     return postJSON('/api/orders/prepare', {
       wallet: publicKey.toBase58(), market: market.address, side, price, size: amount, postOnly, acknowledgePriceRisk,
       expiresInSeconds: expiry ? Number(expiry) : null,
+      takeViaJupiter: smart,
     });
   }
 
@@ -171,7 +176,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
   async function submit() {
     if (!publicKey) return setVisible(true);
     if (!(p > 0) || !(a > 0)) return toast({ kind: 'error', title: 'Enter a price and amount' });
-    setBusy(risky ? null : 'Preparing…');
+    setBusy(risky ? null : smart ? 'Finding the best price…' : 'Preparing…');
     try {
       let prepared = await prepareChecked();
       if (!prepared) return;
@@ -188,12 +193,25 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
       }
       setBusy('Approve in your wallet…');
       const res = await signAndSubmit(prepared, signAllTransactions);
-      toast({
-        kind: 'success',
-        title: `${side === 'buy' ? 'Buy' : 'Sell'} order placed`,
-        message: `${formatAmount(a)} ${base.symbol} at ${price} ${quote.symbol}. Proceeds go to your wallet automatically when it fills.`,
-        link: explorerTx(res.signature),
-      });
+      if (res.swap) {
+        const got = side === 'buy' ? `${formatAmount(res.swap.outAmount)} ${base.symbol}` : `${formatAmount(res.swap.outAmount)} ${quote.symbol}`;
+        const filledBase = side === 'buy' ? res.swap.outAmount : res.swap.inAmount;
+        toast({
+          kind: res.restFailed ? 'error' : 'success',
+          title: `${side === 'buy' ? 'Bought' : 'Sold'} ${formatAmount(filledBase)} ${base.symbol} now`,
+          message: `Average ${formatPrice(res.swap.allInPrice ?? res.swap.price)} ${quote.symbol} including fees (your limit was ${price}); ${got} is in your wallet.`
+            + (res.restingSize ? ` The other ${formatAmount(res.restingSize)} ${base.symbol} is resting at ${price}.` : '')
+            + (res.restFailed ? ` The rest could not be placed: ${res.restFailed}` : ''),
+          link: explorerTx(res.swapSignature),
+        });
+      } else {
+        toast({
+          kind: 'success',
+          title: `${side === 'buy' ? 'Buy' : 'Sell'} order placed`,
+          message: `${formatAmount(a)} ${base.symbol} at ${price} ${quote.symbol}. Proceeds go to your wallet automatically when it fills.`,
+          link: explorerTx(res.signature),
+        });
+      }
       setAmount('');
       onPlaced?.();
     } catch (err) {
@@ -263,7 +281,13 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
       {refPrice === null && p > 0 && (
         <div className="of-note">No reliable market price for this token. Double-check your price before placing.</div>
       )}
-      {crosses && !postOnly && (
+      {jupiterCan && (
+        <label className="of-check of-take-now" title="Jupiter routes across every Solana venue (Manifest, Archer, AMMs). Venue fees and the transaction fee are counted: only what beats your limit after fees fills now.">
+          <input type="checkbox" checked={takeNow} onChange={e => setTakeNow(e.target.checked)} />
+          Fill now at the best price on Solana if it beats your limit after fees; the rest waits here at your price
+        </label>
+      )}
+      {crosses && !postOnly && !smart && (
         <div className="of-note warn">This price crosses the book, so part or all of it will fill immediately.</div>
       )}
       {crosses && postOnly && (

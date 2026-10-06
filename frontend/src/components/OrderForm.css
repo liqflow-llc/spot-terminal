@@ -43,3 +43,5 @@
 .risk-note li { margin: 2px 0; }
 .of-expiry { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
 .of-expiry select { height: 26px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 4px; color: var(--text); font-size: 12px; padding: 0 6px; }
+.of-take-now { align-items: flex-start; line-height: 1.4; }
+.of-take-now input { margin-top: 2px; }

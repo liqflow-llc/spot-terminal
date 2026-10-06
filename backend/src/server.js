@@ -48,6 +48,7 @@ async function referencePrice(address) {
 const orders = new OrderService({
     markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey, referencePrice,
     jupiter: (path, init) => registry.jupFetch(path, init),
+    usdPrices: (mints) => registry.getPrices(mints),
 });
 const keeper = new Keeper({ markets, store: orderStore, keypair: keeperKeypair });
 orders.onPlaced = (id) => keeper.track(id);
@@ -439,7 +440,8 @@ const handle = (fn) => async (req, res) => {
 };
 
 const writeLimit = rateLimit('write', 30, 60_000);
-app.post('/api/orders/prepare', writeLimit, handle(body => orders.prepareOrder(body)));
+// takeViaJupiter: fill what Jupiter can beat the limit by first, rest the remainder here.
+app.post('/api/orders/prepare', writeLimit, handle(body => (body.takeViaJupiter && !body.postOnly ? orders.prepareSmartLimit(body) : orders.prepareOrder(body))));
 app.post('/api/orders/cancel', writeLimit, handle(body => orders.prepareCancel(body)));
 app.post('/api/orders/edit', writeLimit, handle(body => orders.prepareEdit(body)));
 app.post('/api/orders/cancel-all', writeLimit, handle(body => orders.prepareCancelAll(body)));

@@ -7,7 +7,9 @@ import { postJSON } from './api';
  */
 export async function signAndSubmit(prepared, signAllTransactions) {
   // Market orders come from Jupiter as versioned transactions; everything else is legacy.
-  const txs = prepared.transactions.map(b64 => (prepared.versioned
+  // A limit order that fills partly through Jupiter mixes both kinds (versionFlags per tx).
+  const isVersioned = (i) => (prepared.versionFlags ? prepared.versionFlags[i] : prepared.versioned);
+  const txs = prepared.transactions.map((b64, i) => (isVersioned(i)
     ? VersionedTransaction.deserialize(Buffer.from(b64, 'base64'))
     : Transaction.from(Buffer.from(b64, 'base64'))));
   const signed = await signAllTransactions(txs);

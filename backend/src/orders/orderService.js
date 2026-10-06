@@ -86,6 +86,7 @@ function describePending(p) {
         return { market: short(o.market), side: o.side, price: o.price, base: o.baseAtoms, nonce: short(o.nonce), replaces: p.replaces, expires: o.expiresAt ? new Date(o.expiresAt).toISOString() : undefined };
     }
     if (p.kind === 'swap') return { in: p.result?.inAmount, out: p.result?.outAmount, price: p.result?.price };
+    if (p.kind === 'smart') return { now_in: p.swap?.result?.inAmount, now_out: p.swap?.result?.outAmount, now_price: p.swap?.result?.price, rest: p.order?.baseAtoms, limit: p.order?.price, market: short(p.market) };
     if (p.kind === 'cancel') return { order: p.orderId };
     if (p.kind === 'cancelAll') return { orders: p.orderIds?.length };
     if (p.kind === 'createMarket') return { market: short(p.market) };
@@ -126,6 +127,27 @@ export function buildJupiterTransaction(built, payer) {
     return new VersionedTransaction(message);
 }
 
+/**
+ * Lamports a Jupiter swap transaction costs: the 5000-lamport signature fee plus the priority fee
+ * (compute-unit limit x price from its budget instructions; our default price if it sets none).
+ */
+function swapFeeLamports(built) {
+    let units = 200_000, microLamports = null;
+    for (const ix of built.computeBudgetInstructions || []) {
+        const data = Buffer.from(ix.data, 'base64');
+        if (data[0] === 2) units = data.readUInt32LE(1);               // SetComputeUnitLimit
+        if (data[0] === 3) microLamports = Number(data.readBigUInt64LE(1)); // SetComputeUnitPrice
+    }
+    return 5000 + Math.ceil((units * (microLamports ?? PRIORITY_MICROLAMPORTS)) / 1e6);
+}
+
+/** 1234500n, 6 -> "1.2345" */
+function atomsToDecimal(atoms, decimals) {
+    const s = atoms.toString().padStart(decimals + 1, '0');
+    const whole = s.slice(0, s.length - decimals), frac = s.slice(s.length - decimals).replace(/0+$/, '');
+    return frac ? `${whole}.${frac}` : whole;
+}
+
 function fitsInPacket(tx) {
     try {
         return tx.serialize().length <= 1232;
@@ -164,8 +186,9 @@ function parseMint(mint) {
 }
 
 export class OrderService {
-    constructor({ markets, store, keeperPubkey, referencePrice = null, jupiter = null }) {
+    constructor({ markets, store, keeperPubkey, referencePrice = null, jupiter = null, usdPrices = null }) {
         this.markets = markets;
+        this.usdPrices = usdPrices; // async (mints) => { mint: usd } (to value transaction fees)
         this.jupiter = jupiter; // (pathAndQuery, { method, body }) => Promise<json>, rate limited
         this.referencePrice = referencePrice; // async (marketAddress) => price | null
         this.store = store;
@@ -465,19 +488,27 @@ export class OrderService {
         }
         const walletPk = new PublicKey(pending.wallet);
         if (pending.versioned) return signedB64.map((b64, i) => verifyVersioned(b64, pending.messages[i], walletPk));
-        return signedB64.map((b64, i) => {
-            let tx;
-            try {
-                tx = Transaction.from(Buffer.from(b64, 'base64'));
-            } catch {
-                throw new UserError('Malformed signed transaction');
-            }
-            if (!tx.serializeMessage().equals(pending.messages[i])) throw new UserError('Signed transaction does not match the prepared one');
-            const sig = tx.signatures.find(s => s.publicKey.equals(walletPk));
-            if (!sig?.signature) throw new UserError('Transaction is missing the wallet signature');
-            if (!tx.verifySignatures(false)) throw new UserError('Invalid signature');
-            return tx;
-        });
+        // A Jupiter swap (versioned) signed together with our order and payout (legacy).
+        if (pending.versionFlags) {
+            return signedB64.map((b64, i) => (pending.versionFlags[i]
+                ? verifyVersioned(b64, pending.messages[i], walletPk)
+                : this.verifyLegacy(b64, pending.messages[i], walletPk)));
+        }
+        return signedB64.map((b64, i) => this.verifyLegacy(b64, pending.messages[i], walletPk));
+    }
+
+    verifyLegacy(b64, expected, walletPk) {
+        let tx;
+        try {
+            tx = Transaction.from(Buffer.from(b64, 'base64'));
+        } catch {
+            throw new UserError('Malformed signed transaction');
+        }
+        if (!tx.serializeMessage().equals(expected)) throw new UserError('Signed transaction does not match the prepared one');
+        const sig = tx.signatures.find(x => x.publicKey.equals(walletPk));
+        if (!sig?.signature) throw new UserError('Transaction is missing the wallet signature');
+        if (!tx.verifySignatures(false)) throw new UserError('Invalid signature');
+        return tx;
     }
 
     async send(tx, { blockhash, lastValidBlockHeight }) {
@@ -556,7 +587,33 @@ export class OrderService {
             return { ok: true, signature };
         }
 
-        // Order: record the claim before sending so a crash can never lose it.
+        if (pending.kind === 'smart') {
+            // The instant part first: if Jupiter's swap fails (the price moved), nothing else is sent.
+            const [swapTx, ...orderTxs] = txs;
+            let swapSignature;
+            try {
+                swapSignature = await this.send(swapTx, pending.swap);
+            } catch (err) {
+                throw new UserError(`The instant fill didn't go through (${err.message.slice(0, 100)}), so nothing was placed. Please try again.`);
+            }
+            const filledNow = { swapSignature, swap: pending.swap.result };
+            if (!pending.order) return { ok: true, signature: swapSignature, ...filledNow };
+            try {
+                const placed = await this.submitOrderTxs(pending, orderTxs);
+                return { ...placed, ...filledNow, restingSize: Number(pending.order.baseAtoms) / 10 ** pending.order.baseDecimals };
+            } catch (err) {
+                // The instant part already happened: report it, and that the rest wasn't placed.
+                log.warn('orders', 'smart_rest_failed', { wallet: short(pending.wallet), msg: errorDetail(err) });
+                return { ok: true, signature: swapSignature, ...filledNow, restFailed: err.message };
+            }
+        }
+
+        return this.submitOrderTxs(pending, txs);
+    }
+
+    /** Send an order's place transaction (its pre-signed payout was recorded first). */
+    async submitOrderTxs(pending, txs) {
+        // Record the claim before sending so a crash can never lose it.
         if (!this.store.noncesFor(pending.wallet).includes(pending.order.nonce)) {
             throw new UserError('Your payout accounts were refunded, please place the order again.');
         }
@@ -596,6 +653,180 @@ export class OrderService {
         });
         this.onPlaced?.(order.id);
         return { ok: true, signature, orderId: order.id, sequenceNumber };
+    }
+
+    // ---------- limit orders that take Jupiter's better price first ----------
+
+    /**
+     * A limit order whose price Jupiter can beat right now: take what Jupiter can fill at an
+     * average at or better than the limit (guaranteed by the swap's minimum output), then rest the
+     * remainder on Manifest at the limit. One approval signs the swap, the order and its payout.
+     * Falls back to a plain limit order when Jupiter can't help.
+     */
+    async prepareSmartLimit(params) {
+        const { wallet, market, side, price, size, acknowledgePriceRisk = false, expiresInSeconds = null } = params;
+        const walletPk = parseWallet(wallet);
+        const limit = Number(price);
+        if (!(limit > 0)) throw new UserError('Enter a price above zero');
+        if (!this.jupiter) return this.prepareOrder(params);
+        const s = this.markets.summary(market);
+        if (!s) throw new UserError('Unknown market');
+        await this.checkPriceRisk(market, side, limit, acknowledgePriceRisk);
+
+        // Only worth the Jupiter calls when the limit is through the market price.
+        const reference = this.referencePrice ? await this.referencePrice(market).catch(() => null) : null;
+        const crosses = reference && (side === 'buy' ? limit >= reference * 0.999 : limit <= reference * 1.001);
+        if (!crosses) return this.prepareOrder({ ...params, acknowledgePriceRisk: true });
+
+        const sizeAtoms = toAtoms(size, s.baseDecimals);
+        // The swap transaction's network + priority fee counts against Jupiter's price, valued in the
+        // quote token: a bid only goes to Jupiter if it still beats the limit after that fee.
+        const prices = this.usdPrices ? await this.usdPrices([NATIVE_MINT.toBase58(), s.quoteMint]).catch(() => ({})) : {};
+        const solInQuote = isNativeMint(s.quoteMint) ? 1 : (prices[NATIVE_MINT.toBase58()] > 0 && prices[s.quoteMint] > 0 ? prices[NATIVE_MINT.toBase58()] / prices[s.quoteMint] : null);
+        if (solInQuote == null) return this.prepareOrder({ ...params, acknowledgePriceRisk: true }); // can't value the fee: don't risk it
+        const take = await this.findJupiterTake({ side, limit, sizeAtoms, s, taker: walletPk.toBase58(), solInQuote }).catch((err) => {
+            log.warn('orders', 'smart_take_failed', { market: short(market), msg: err.message });
+            return null;
+        });
+        if (!take) return this.prepareOrder({ ...params, acknowledgePriceRisk: true });
+
+        // Enough in the wallet for both parts?
+        const isBuy = side === 'buy';
+        const remainder = sizeAtoms > take.baseAtoms ? sizeAtoms - take.baseAtoms : 0n;
+        const restAtoms = remainder * 200n > sizeAtoms ? remainder : 0n; // skip a dust remainder (<0.5%)
+        const spendMint = isBuy ? s.quoteMint : s.baseMint;
+        const spendProgram = (await connection.getAccountInfo(new PublicKey(spendMint), 'confirmed'))?.owner;
+        const lamports = await connection.getBalance(walletPk, 'confirmed');
+        const have = await this.tokenBalanceAtoms(walletPk, spendMint, spendProgram, lamports);
+        const restLock = isBuy ? BigInt(Math.ceil(Number(restAtoms) * limit * 10 ** (s.quoteDecimals - s.baseDecimals))) : restAtoms;
+        const reserve = isNativeMint(spendMint) ? 20_000_000n : 0n;
+        if (take.inAtoms + restLock + reserve > have) throw new UserError('Insufficient balance for this order.');
+
+        const swapTx = buildJupiterTransaction(take.quote, walletPk);
+        if (!fitsInPacket(swapTx)) return this.prepareOrder({ ...params, acknowledgePriceRisk: true });
+        await this.simulateOrThrow(swapTx);
+        const swapResult = {
+            inAmount: Number(take.inAtoms) / 10 ** (isBuy ? s.quoteDecimals : s.baseDecimals),
+            outAmount: Number(take.outAtoms) / 10 ** (isBuy ? s.baseDecimals : s.quoteDecimals),
+        };
+        swapResult.price = isBuy ? swapResult.inAmount / swapResult.outAmount : swapResult.outAmount / swapResult.inAmount;
+        // Including the transaction fee, as the limit check does.
+        swapResult.allInPrice = isBuy
+            ? (swapResult.inAmount + take.feeQuote) / swapResult.outAmount
+            : (swapResult.outAmount - take.feeQuote) / swapResult.inAmount;
+        const swapPart = {
+            message: Buffer.from(swapTx.message.serialize()),
+            b64: Buffer.from(swapTx.serialize()).toString('base64'),
+            blockhash: swapTx.message.recentBlockhash,
+            lastValidBlockHeight: take.quote.blockhashWithMetadata.lastValidBlockHeight,
+            result: swapResult,
+        };
+
+        let orderPrepared = null, orderPending = null;
+        if (restAtoms > 0n) {
+            orderPrepared = await this.prepareOrder({
+                wallet, market, side, price, size: atomsToDecimal(restAtoms, s.baseDecimals), acknowledgePriceRisk: true, expiresInSeconds,
+            });
+            if (orderPrepared.step === 'setup') return orderPrepared; // payout accounts first, then re-prepare
+            orderPending = this.pending.get(orderPrepared.id);
+            this.pending.delete(orderPrepared.id);
+        }
+
+        const id = crypto.randomUUID();
+        this.pending.set(id, {
+            kind: 'smart', wallet: walletPk.toBase58(), market, createdAt: Date.now(),
+            messages: [swapPart.message, ...(orderPending?.messages || [])],
+            versionFlags: [true, ...(orderPending?.messages || []).map(() => false)],
+            swap: { blockhash: swapPart.blockhash, lastValidBlockHeight: swapPart.lastValidBlockHeight, result: swapResult },
+            order: orderPending?.order || null,
+            blockhash: orderPending?.blockhash, lastValidBlockHeight: orderPending?.lastValidBlockHeight,
+            replenishNonce: orderPending?.replenishNonce || null,
+        });
+        return {
+            step: 'sign',
+            id,
+            versionFlags: [true, ...(orderPrepared?.transactions || []).map(() => false)],
+            transactions: [swapPart.b64, ...(orderPrepared?.transactions || [])],
+            summary: {
+                title: 'Limit order',
+                now: swapResult,
+                restSize: Number(restAtoms) / 10 ** s.baseDecimals,
+                limit,
+                networkFee: take.feeQuote,
+                venues: [...new Set((take.quote.routePlan || []).map(r => r.swapInfo?.label).filter(Boolean))],
+            },
+        };
+    }
+
+    /**
+     * How much of a limit order Jupiter can fill right now at an average at or better than the
+     * limit, as a ready-to-build quote whose minimum output enforces that average. Null if none.
+     */
+    async findJupiterTake({ side, limit, sizeAtoms, s, taker, solInQuote }) {
+        const isBuy = side === 'buy';
+        const inMint = isBuy ? s.quoteMint : s.baseMint, outMint = isBuy ? s.baseMint : s.quoteMint;
+        const scale = 10 ** (s.quoteDecimals - s.baseDecimals); // quote atoms per base atom at price 1
+        const build = (amount, slippageBps = 50) => this.jupiter(
+            `/swap/v2/build?inputMint=${inMint}&outputMint=${outMint}&amount=${amount}&slippageBps=${slippageBps}&taker=${taker}&maxAccounts=40`);
+        // Jupiter's quoted output is already net of every venue's trading fee (and Jupiter adds
+        // none); what's left to count is this transaction's network + priority fee, in quote atoms.
+        const feeQuoteAtoms = (q) => (swapFeeLamports(q) / 1e9) * solInQuote * 10 ** s.quoteDecimals;
+        // The fewest output atoms that keep the all-in average at or better than the limit.
+        const limitMinOut = (inAtoms, q) => (isBuy
+            ? Math.ceil((inAtoms + feeQuoteAtoms(q)) / (limit * scale)) // (spent + fee) / got <= limit
+            : Math.ceil(inAtoms * limit * scale + feeQuoteAtoms(q)));  // (got - fee) / sold >= limit
+        const S = Number(sizeAtoms);
+        const tryIn = async (inAtoms) => {
+            const q = await build(Math.floor(inAtoms));
+            const out = Number(q.outAmount);
+            return { inAtoms: Math.floor(inAtoms), out, q, ok: out >= limitMinOut(inAtoms, q) };
+        };
+
+        let best = null;
+        if (!isBuy) {
+            // Sell: spend base; try all of it, else bisect.
+            const full = await tryIn(S);
+            if (full.ok) best = full;
+            else {
+                let lo = 0, hi = S;
+                for (let i = 0; i < 3; i++) {
+                    const mid = (lo + hi) / 2;
+                    const r = await tryIn(mid);
+                    if (r.ok) { best = r; lo = mid; } else hi = mid;
+                }
+            }
+        } else {
+            // Buy: spend quote. Size the spend to come out at about S base, then check the average.
+            const budget = Math.ceil(S * limit * scale);
+            const probe = await tryIn(budget);
+            if (probe.out >= S) {
+                const r = await tryIn(budget * (S / probe.out) * 1.0005);
+                if (r.ok) best = r;
+            }
+            if (!best) {
+                let lo = 0, hi = probe.out >= S ? budget * (S / probe.out) : budget;
+                for (let i = 0; i < 3; i++) {
+                    const mid = (lo + hi) / 2;
+                    const r = await tryIn(mid);
+                    if (r.ok) { best = r; lo = mid; } else hi = mid;
+                }
+            }
+        }
+        const baseOf = (r) => (isBuy ? r.out : r.inAtoms);
+        if (!best || baseOf(best) < S * 0.01) return null;
+
+        // Final build with a slippage that guarantees the all-in limit average (or 0.5%, if tighter).
+        const minOut = limitMinOut(best.inAtoms, best.q);
+        const slippageBps = Math.max(1, Math.min(50, Math.floor((1 - minOut / best.out) * 10_000)));
+        const quote = await build(best.inAtoms, slippageBps);
+        if (Number(quote.otherAmountThreshold) < limitMinOut(best.inAtoms, quote)) return null; // price moved against us meanwhile
+        return {
+            quote,
+            feeQuote: feeQuoteAtoms(quote) / 10 ** s.quoteDecimals,
+            inAtoms: BigInt(best.inAtoms),
+            outAtoms: BigInt(quote.outAmount),
+            baseAtoms: BigInt(isBuy ? quote.outAmount : best.inAtoms),
+        };
     }
 
     // ---------- market orders (Jupiter) ----------
