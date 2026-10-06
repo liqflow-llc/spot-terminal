@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { WalletProvider } from '@solana/wallet-adapter-react';
 import { WalletModalProvider } from '@solana/wallet-adapter-react-ui';
 import '@solana/wallet-adapter-react-ui/styles.css';
+import { initTheme } from './theme';
 // Fonts are served from this site (no Google Fonts request: faster, and Google doesn't see visitors).
 import '@fontsource/inter/latin-400.css';
 import '@fontsource/inter/latin-500.css';
@@ -20,6 +21,7 @@ installGlobalErrorReporting();
 
 // Wallets that implement the Wallet Standard (Phantom, Solflare, Backpack, ...) are detected
 // automatically, so no adapters are listed here.
+initTheme();
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <BrowserRouter>

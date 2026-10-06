@@ -15,3 +15,8 @@
 .account-stats dd { margin: 2px 0 0; font-size: 18px; font-weight: 600; }
 .account-card .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .account-legal { margin-top: 16px; }
+.segmented { display: inline-flex; padding: 3px; gap: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
+.segmented button { min-width: 72px; height: 30px; padding: 0 12px; border: 0; border-radius: 4px; background: none; color: var(--text-2); cursor: pointer; font-weight: 500; }
+.segmented button:hover { color: var(--text); }
+.segmented button.active { background: var(--accent-bg); color: var(--accent); font-weight: 600; }
+.segmented button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

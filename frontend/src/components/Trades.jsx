@@ -2,6 +2,7 @@ import { formatAmount, formatPrice, formatTime, priceDecimals } from '../utils/f
 import './Trades.css';
 import './OrderBook.css'; // venue badge style
 import { VENUE_INFO } from '../venues';
+import Tooltip from './Tooltip.jsx';
 
 export default function Trades({ trades, market }) {
   const decimals = priceDecimals(market?.last ?? trades[0]?.price);
@@ -16,7 +17,7 @@ export default function Trades({ trades, market }) {
             <>
               <span className={`num ${t.side === 'buy' ? 'bid' : 'ask'}`}>
                 {formatPrice(t.price, decimals)}
-                {t.venue === 'archer' && <span className="venue-badge archer" title={VENUE_INFO.archer}>A</span>}
+                {t.venue === 'archer' && <Tooltip text={VENUE_INFO.archer} underline={false}><span className="venue-badge archer">A</span></Tooltip>}
               </span>
               <span className="num">{formatAmount(t.size)}</span>
               <span className="num muted">{formatTime(t.time)}</span>

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createDatafeed } from '../services/datafeed';
 import { formatAmount } from '../utils/format';
 import { reportError } from '../services/report';
+import { useTheme } from '../theme';
 import './TradingViewChart.css';
 
 // The Advanced Charts library is a licensed static bundle served from /charting_library/
@@ -26,21 +27,25 @@ function loadLibrary() {
   return libraryPromise;
 }
 
-const BG = '#12161c';
-const OVERRIDES = {
-  'paneProperties.background': BG,
+// Chart colours per site theme (TradingView can't read our CSS variables).
+const CHART_THEME = {
+  dark: { bg: '#12161c', grid: 'rgba(255,255,255,0.04)', text: '#8a94a3', line: '#232a33' },
+  light: { bg: '#ffffff', grid: 'rgba(0,0,0,0.06)', text: '#5a6575', line: '#e2e6ec' },
+};
+const overridesFor = (theme) => ({
+  'paneProperties.background': CHART_THEME[theme].bg,
   'paneProperties.backgroundType': 'solid',
-  'paneProperties.vertGridProperties.color': 'rgba(255,255,255,0.04)',
-  'paneProperties.horzGridProperties.color': 'rgba(255,255,255,0.04)',
-  'scalesProperties.textColor': '#8a94a3',
-  'scalesProperties.lineColor': '#232a33',
+  'paneProperties.vertGridProperties.color': CHART_THEME[theme].grid,
+  'paneProperties.horzGridProperties.color': CHART_THEME[theme].grid,
+  'scalesProperties.textColor': CHART_THEME[theme].text,
+  'scalesProperties.lineColor': CHART_THEME[theme].line,
   'mainSeriesProperties.candleStyle.upColor': '#2ebd85',
   'mainSeriesProperties.candleStyle.downColor': '#f6465d',
   'mainSeriesProperties.candleStyle.borderUpColor': '#2ebd85',
   'mainSeriesProperties.candleStyle.borderDownColor': '#f6465d',
   'mainSeriesProperties.candleStyle.wickUpColor': '#2ebd85',
   'mainSeriesProperties.candleStyle.wickDownColor': '#f6465d',
-};
+});
 
 const DISABLED_FEATURES = [
   'header_symbol_search',
@@ -61,6 +66,8 @@ export default function TradingViewChart({ address, onTrade, orders = [], onCanc
   const addressRef = useRef(address); // the market we should show
   const shownRef = useRef(null);      // the market the chart was last told to show
   const [error, setError] = useState(null);
+  const { theme } = useTheme();
+  const themeRef = useRef(theme);    // the theme the chart is showing
   const [ready, setReady] = useState(0); // bumps when the chart is ready or shows a new market
   const linesRef = useRef(new Map());     // order id -> { key, line }   (open orders)
   const fillsRef = useRef(new Map());     // order id -> shape           (filled orders)
@@ -82,13 +89,13 @@ export default function TradingViewChart({ address, onTrade, orders = [], onCanc
         symbol: (shownRef.current = addressRef.current),
         interval: '15',
         locale: 'en',
-        theme: 'dark',
+        theme: themeRef.current,
         autosize: true,
         timezone: 'Etc/UTC',
         disabled_features: DISABLED_FEATURES,
         enabled_features: ['hide_left_toolbar_by_default'],
-        overrides: OVERRIDES,
-        loading_screen: { backgroundColor: BG, foregroundColor: '#4c8dff' },
+        overrides: overridesFor(themeRef.current),
+        loading_screen: { backgroundColor: CHART_THEME[themeRef.current].bg, foregroundColor: '#4c8dff' },
       });
       widgetRef.current = widget;
       widget.onChartReady(() => {
@@ -106,6 +113,18 @@ export default function TradingViewChart({ address, onTrade, orders = [], onCanc
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Follow the site's light/dark setting. Our colours are re-applied whenever the chart is ready,
+  // because TradingView restores the pane colours it saved from an earlier visit over `overrides`.
+  useEffect(() => {
+    const widget = widgetRef.current;
+    if (!widget || !readyRef.current) return;
+    const switching = themeRef.current !== theme;
+    themeRef.current = theme;
+    (switching ? widget.changeTheme(theme, { disableUndo: true }) : Promise.resolve())
+      .then(() => widget.applyOverrides(overridesFor(theme)))
+      .catch(err => reportError('chart_theme_failed', err));
+  }, [theme, ready]);
 
   useEffect(() => {
     const widget = widgetRef.current;

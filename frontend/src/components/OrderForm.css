@@ -30,7 +30,7 @@
 .of-pct:disabled { opacity: .4; cursor: default; }
 .of-note { font-size: 12px; padding: 6px 8px; border-radius: 4px; background: var(--panel-2); }
 .of-note.warn { color: var(--warn); }
-.of-note.danger { color: #fff; background: rgba(246, 70, 93, 0.16); border: 1px solid var(--ask); line-height: 1.45; }
+.of-note.danger { color: var(--text); background: var(--ask-bg); border: 1px solid var(--ask); line-height: 1.45; }
 .of-submit { height: 42px; border: 0; border-radius: var(--radius); font-weight: 700; font-size: 14px; color: #fff; cursor: pointer; }
 .of-submit.buy { background: var(--bid); }
 .of-submit.sell { background: var(--ask); }

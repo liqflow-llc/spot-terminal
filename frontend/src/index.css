@@ -15,11 +15,55 @@
   --accent: #4c8dff;
   --accent-bg: rgba(76, 141, 255, 0.14);
   --warn: #f0a93b;
+  --archer: #f5c542;
+  --archer-bg: rgba(245, 197, 66, 0.16);
+  --gold: #f5c542;
+  --accent-hover: #3b7cf0;
+  --grid: rgba(255, 255, 255, 0.04);
   --radius: 6px;
   --font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   color-scheme: dark;
 }
+
+/* Light theme: same tokens, chosen on the Account page (default follows the device). */
+:root[data-theme="light"] {
+  --bg: #f5f7fa;
+  --panel: #ffffff;
+  --panel-2: #f3f5f8;
+  --panel-3: #e9edf2;
+  --border: #e2e6ec;
+  --border-2: #cfd6df;
+  --text: #121821;
+  --text-2: #465161;
+  --muted: #737e8e;
+  --bid: #0e9567;
+  --ask: #dc2947;
+  --bid-bg: rgba(14, 149, 103, 0.11);
+  --ask-bg: rgba(220, 41, 71, 0.10);
+  --accent: #2f6fed;
+  --accent-bg: rgba(47, 111, 237, 0.10);
+  --warn: #b26b00;
+  --archer: #a87500;
+  --archer-bg: rgba(212, 150, 0, 0.16);
+  --gold: #e0a800;
+  --accent-hover: #1f5ed8;
+  --grid: rgba(0, 0, 0, 0.06);
+  color-scheme: light;
+}
+
+/* The wallet picker and its dropdown, in our colours (the library ships dark-only). */
+.wallet-adapter-modal-wrapper { background: var(--panel); color: var(--text); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3); }
+.wallet-adapter-modal-title, .wallet-adapter-modal-list-more, .wallet-adapter-modal-list .wallet-adapter-button { color: var(--text); }
+.wallet-adapter-modal-list .wallet-adapter-button:not([disabled]):hover { background: var(--panel-3); }
+.wallet-adapter-modal-list li:not(:first-of-type) { margin-top: 2px; }
+.wallet-adapter-modal-button-close { background: var(--panel-3); }
+.wallet-adapter-modal-button-close svg { fill: var(--text-2); }
+.wallet-adapter-modal-list-more svg { fill: var(--text); }
+.wallet-adapter-modal-list .wallet-adapter-button span { color: var(--muted); }
+.wallet-adapter-dropdown-list { background: var(--panel); color: var(--text); border: 1px solid var(--border); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25); }
+.wallet-adapter-dropdown-list-item { color: var(--text); }
+.wallet-adapter-dropdown-list-item:not([disabled]):hover { background: var(--panel-3); }
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }

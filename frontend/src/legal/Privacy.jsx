@@ -13,6 +13,7 @@ import './Legal.css';
 const STORAGE = [
   ['walletName', 'localStorage', 'Which wallet you connected, so it reconnects next time.', 'Until you disconnect'],
   ['spot.favoriteMarkets', 'localStorage', 'Markets you starred.', 'Until you clear it'],
+  ['spot.theme', 'localStorage', 'Your light or dark theme choice (only if you change it from System).', 'Until you clear it'],
   ['tradingview.*', 'localStorage', 'Chart settings you change (indicators, chart type).', 'Until you clear it'],
   ['sw.js (service worker)', 'Service worker', 'Shows order notifications; installed only if you turn them on.', 'Until you clear site data'],
   ['spot.quoteFilter', 'localStorage', 'The SOL / USDC pairs filter you picked.', 'Until you clear it'],

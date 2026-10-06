@@ -17,6 +17,5 @@
 .ob-foot { font-size: 11px; padding: 6px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
 
 .venue-badge { display: inline-block; margin-left: 4px; padding: 0 3px; border-radius: 3px; font-size: 9px; font-weight: 700; line-height: 13px; vertical-align: 1px; font-family: var(--font); }
-.venue-badge.archer { background: rgba(245, 197, 66, 0.16); color: #f5c542; }
+.venue-badge.archer { background: var(--archer-bg); color: var(--archer); }
 .ob-foot { line-height: 1.35; height: 42px; box-sizing: border-box; overflow: hidden; flex-shrink: 0; }
-.venue-name { text-decoration: underline dotted; text-underline-offset: 2px; cursor: help; }

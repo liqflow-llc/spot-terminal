@@ -7,6 +7,7 @@ import { useFavorites } from '../hooks/useFavorites';
 import { formatPct, formatPrice, formatUsd, formatAmount, shortAddress } from '../utils/format';
 import './MarketHeader.css';
 import { VENUE_INFO } from '../venues';
+import Tooltip from './Tooltip.jsx';
 
 const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
@@ -311,9 +312,9 @@ function TokenAddress({ token, market }) {
 
 function Stat({ label, value, className = '', title }) {
   return (
-    <div className="stat" title={title}>
+    <div className="stat">
       <span className="stat-label">{label}</span>
-      <span className={`stat-value num ${className}`}>{value}</span>
+      <span className={`stat-value num ${className}`}>{title ? <Tooltip text={title}>{value}</Tooltip> : value}</span>
     </div>
   );
 }

@@ -43,7 +43,7 @@
 
 .star { background: none; border: 0; padding: 0; line-height: 1; cursor: pointer; color: var(--muted); }
 .star:hover { color: var(--text-2); }
-.star.on { color: #f5c542; }
+.star.on { color: var(--gold); }
 .selector-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 .token-address a { color: var(--text); }

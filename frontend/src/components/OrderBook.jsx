@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { formatAmount, formatPrice, priceDecimals, shortAddress } from '../utils/format';
+import { formatAmount, formatPrice, priceDecimals } from '../utils/format';
 import './OrderBook.css';
 import { VENUE_INFO } from '../venues';
+import Tooltip from './Tooltip.jsx';
 
 const ROW_HEIGHT = 20;
 
@@ -59,7 +60,6 @@ export default function OrderBook({ book, market, onPick }) {
 
   const sourceCount = book?.sources?.length || 0;
   const hasArcher = book?.sources?.some(s => s.venue === 'archer' && s.market) && [...(book?.bids || []), ...(book?.asks || [])].some(l => Object.keys(l[2]).some(id => id.startsWith('archer:')));
-  const venueOf = (id) => (id.startsWith('archer:') ? 'Archer' : 'Manifest');
   const spread = book?.bestAsk && book?.bestBid ? book.bestAsk - book.bestBid : null;
 
   const row = (l, side) => (
@@ -69,11 +69,10 @@ export default function OrderBook({ book, market, onPick }) {
       className={`ob-row ${side}`}
       style={{ '--depth': `${maxCum ? (l.cum / maxCum) * 100 : 0}%` }}
       onClick={() => onPick?.(l.price)}
-      title={sourceCount > 1 ? Object.entries(l.sources).map(([s, v]) => `${venueOf(s)} ${shortAddress(s.split(':')[1])}: ${formatAmount(v)}`).join('\n') : undefined}
     >
       <span className={`num ${side}`}>
         {formatPrice(l.price, decimals)}
-        {Object.keys(l.sources).some(id => id.startsWith('archer:')) && <span className="venue-badge archer" aria-label="Includes Archer liquidity">A</span>}
+        {Object.keys(l.sources).some(id => id.startsWith('archer:')) && <span className="venue-badge archer" aria-label="Includes Archer orders">A</span>}
       </span>
       <span className="num">{formatAmount(l.size)}</span>
       <span className="num muted">{formatAmount(l.price * l.size)}</span>
@@ -112,7 +111,7 @@ export default function OrderBook({ book, market, onPick }) {
       {/* Always rendered (fixed height) so the book doesn't jump when the sources arrive. */}
       <div className="ob-foot muted">
         {!book ? '\u00a0' : hasArcher
-          ? <><span className="venue-badge archer" title={VENUE_INFO.archer}>A</span> = <Venue id="archer">Archer</Venue> order, other orders sit on <Venue id="manifest">Manifest</Venue></>
+          ? <><Tooltip text={VENUE_INFO.archer} underline={false}><span className="venue-badge archer">A</span></Tooltip> = <Venue id="archer">Archer</Venue> order, other orders sit on <Venue id="manifest">Manifest</Venue></>
           : sourceCount > 1 ? <>Aggregated from {sourceCount} <Venue id="manifest">Manifest</Venue> markets for this pair</> : <>Source: <Venue id="manifest">Manifest</Venue></>}
       </div>
     </>
@@ -120,5 +119,5 @@ export default function OrderBook({ book, market, onPick }) {
 }
 
 function Venue({ id, children }) {
-  return <span className="venue-name" title={VENUE_INFO[id]}>{children}</span>;
+  return <Tooltip text={VENUE_INFO[id]}>{children}</Tooltip>;
 }

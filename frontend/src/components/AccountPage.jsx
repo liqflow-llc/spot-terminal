@@ -10,6 +10,7 @@ import '../legal/Legal.css';
 import './AccountPage.css';
 import { reportError } from '../services/report';
 import { usePushNotifications } from '../hooks/usePushNotifications';
+import { useTheme } from '../theme';
 
 const sol = (n) => `${Number(n || 0).toFixed(5)} SOL`;
 
@@ -50,6 +51,7 @@ export default function AccountPage() {
 
   const count = payout?.accounts.length || 0;
   const push = usePushNotifications(wallet);
+  const { pref: themePref, setPref: setThemePref } = useTheme();
 
   return (
     <div className="app account-page">
@@ -139,6 +141,25 @@ export default function AccountPage() {
               {push.error && <div className="account-row error">{push.error}</div>}
             </>
           )}
+        </section>
+
+        <section className="account-card">
+          <h2>Appearance</h2>
+          <div className="segmented" role="radiogroup" aria-label="Theme">
+            {[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={themePref === value}
+                className={themePref === value ? 'active' : ''}
+                onClick={() => setThemePref(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="muted small">System follows your device&apos;s light or dark setting. Saved in this browser.</p>
         </section>
 
         <p className="legal-links account-legal">
