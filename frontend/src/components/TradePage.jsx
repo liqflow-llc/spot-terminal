@@ -6,6 +6,7 @@ import MarketHeader from './MarketHeader.jsx';
 import OrderBook from './OrderBook.jsx';
 import Trades from './Trades.jsx';
 import TradingViewChart from './TradingViewChart.jsx';
+import ErrorBoundary from './ErrorBoundary.jsx';
 import OrderForm from './OrderForm.jsx';
 import AccountPanel from './AccountPanel.jsx';
 import { useMarketStream } from '../hooks/useMarketStream';
@@ -22,6 +23,7 @@ export default function TradePage() {
   const { account, refresh } = useAccount(wallet, address);
   const [pickedPrice, setPickedPrice] = useState(null);
   const [mobileTab, setMobileTab] = useState('Chart');
+  const [orderAction, setOrderAction] = useState(null); // from the chart: { type: 'cancel'|'edit', order, price }
 
   useEffect(() => {
     if (market) document.title = `${market.last ? market.last.toPrecision(6) : ''} ${market.symbol} · Spot`;
@@ -53,7 +55,16 @@ export default function TradePage() {
           <OrderBook book={book} market={market} onPick={pickPrice} />
         </section>
         <section className="panel area-chart">
-          <TradingViewChart address={address} market={market} onTrade={onTrade} />
+          <ErrorBoundary name="chart">
+          <TradingViewChart
+            address={address}
+            market={market}
+            onTrade={onTrade}
+            orders={account?.orders}
+            onCancelOrder={(order) => setOrderAction({ type: 'cancel', order, at: Date.now() })}
+            onMoveOrder={(order, price) => setOrderAction({ type: 'edit', order, price, at: Date.now() })}
+          />
+          </ErrorBoundary>
         </section>
         <section className="panel area-form">
           <OrderForm market={market} book={book} account={account} pickedPrice={pickedPrice} onPlaced={refresh} />
@@ -62,7 +73,7 @@ export default function TradePage() {
           <Trades trades={trades} market={market} />
         </section>
         <section className="panel area-account">
-          <AccountPanel account={account} market={market} wallet={wallet} onChange={refresh} />
+          <AccountPanel account={account} market={market} wallet={wallet} onChange={refresh} action={orderAction} />
         </section>
       </main>
     </div>

@@ -74,12 +74,13 @@ for (let i = 0; i < 60; i++) {
 }
 
 let failed = false;
+const errors = [];
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: 'new', userDataDir: path.join(dataDir, 'chrome'), args: ['--no-first-run'] });
 try {
     const page = await browser.newPage();
     await page.setViewport({ width: 1600, height: 920 });
-    const errors = [];
     page.on('pageerror', e => errors.push(e.message));
+    page.on('console', m => m.type() === 'error' && errors.push(`console: ${m.text()}`));
 
     // The page asks Node to sign: the mock wallet holds no key itself.
     await page.exposeFunction('__mockSign', (b64) => {
@@ -368,9 +369,12 @@ try {
 } catch (err) {
     failed = true;
     console.log('\nUI test FAILED:', err.message);
+    if (errors.length) console.log('  page errors:', errors.slice(-5));
     console.log(backendLog.split('\n').filter(l => /error|fail|Keeper/i.test(l)).slice(-15).join('\n'));
     try { await (await browser.pages())[1]?.screenshot({ path: path.join(shotsDir, 'failure.png') }); console.log('  failure screenshot', path.join(shotsDir, 'failure.png')); } catch { /* ignore */ }
 } finally {
+    const clientErrors = backendLog.split('\n').filter(l => l.includes('[client]'));
+    if (clientErrors.length) console.log('  errors reported by the page:\n   ' + clientErrors.slice(-8).join('\n   '));
     await browser.close();
     backend.kill();
 }

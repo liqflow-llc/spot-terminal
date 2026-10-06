@@ -11,7 +11,8 @@ import { toInputString } from '../utils/format';
 export default function EditOrderModal({ order, onClose, onDone }) {
   const { publicKey, signAllTransactions } = useWallet();
   const toast = useToast();
-  const [price, setPrice] = useState(toInputString(order.price, 10));
+  // Dragging the order's line on the chart opens this with the new price filled in.
+  const [price, setPrice] = useState(toInputString(order.initialPrice ?? order.price, 10));
   const [amount, setAmount] = useState(toInputString(order.size, order.baseDecimals));
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 import { useToast } from './Toasts.jsx';
@@ -25,7 +25,7 @@ const STATUS = {
   replacing: 'Updating',
 };
 
-export default function AccountPanel({ account, market, wallet, onChange }) {
+export default function AccountPanel({ account, market, wallet, onChange, action }) {
   const { signAllTransactions } = useWallet();
   const { setVisible } = useWalletModal();
   const toast = useToast();
@@ -56,6 +56,13 @@ export default function AccountPanel({ account, market, wallet, onChange }) {
   }
 
   const cancel = (o) => run(o.id, { url: '/api/orders/cancel', body: { orderId: o.id } }, o.status === 'expired' ? 'Withdrawn to wallet' : 'Order cancelled, funds returned');
+  // Actions started from the chart's order lines.
+  useEffect(() => {
+    if (!action) return;
+    if (action.type === 'cancel') cancel(action.order);
+    else if (action.type === 'edit' && action.order.status === 'open') setEditing({ ...action.order, initialPrice: action.price });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [action]);
   const cancellable = open.filter(o => o.market === market?.address && (o.status === 'open' || o.status === 'expired'));
   const cancelAll = () => run('cancel-all', { url: '/api/orders/cancel-all', body: { market: market.address } }, 'Orders cancelled, funds returned');
   const withdraw = () => run('withdraw', { url: '/api/orders/withdraw', body: { market: market.address } }, 'Withdrawn to wallet');
