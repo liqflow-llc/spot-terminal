@@ -36,6 +36,9 @@ const PREPARE_TTL_MS = 3 * 60 * 1000;
 const NONCES_PER_SETUP = 2;
 const CREATE_MARKET_CU = 100_000;
 const MAX_SLIPPAGE_BPS = 1000;
+const CANCEL_ALL_MAX = 6;
+const SLOT_SECONDS = 0.4; // Solana's target slot time; real slots run a little slower, so expiry errs late
+const MAX_EXPIRY_SECONDS = 30 * 24 * 3600;
 const QUOTE_CACHE_MS = 3000;
 const SWAP_MAX_PRIORITY_LAMPORTS = 1_000_000; // cap on Jupiter's priority fee (0.001 SOL)
 /** Buying this far above (or selling this far below) the market price needs explicit consent. */
@@ -79,10 +82,11 @@ function parseWallet(wallet) {
 function describePending(p) {
     if (p.kind === 'order') {
         const o = p.order;
-        return { market: short(o.market), side: o.side, price: o.price, base: o.baseAtoms, nonce: short(o.nonce) };
+        return { market: short(o.market), side: o.side, price: o.price, base: o.baseAtoms, nonce: short(o.nonce), replaces: p.replaces, expires: o.expiresAt ? new Date(o.expiresAt).toISOString() : undefined };
     }
     if (p.kind === 'swap') return { in: p.result?.inAmount, out: p.result?.outAmount, price: p.result?.price };
     if (p.kind === 'cancel') return { order: p.orderId };
+    if (p.kind === 'cancelAll') return { orders: p.orderIds?.length };
     if (p.kind === 'createMarket') return { market: short(p.market) };
     if (p.kind === 'closePayout') return { accounts: p.nonceAddresses?.length, sol: p.refundLamports / 1e9 };
     if (p.kind === 'setup') return { accounts: p.nonceAddresses?.length };
@@ -232,23 +236,13 @@ export class OrderService {
 
     // ---------- place ----------
 
-    async prepareOrder({ wallet, market, side, price, size, postOnly = false, acknowledgePriceRisk = false }) {
+    async prepareOrder({ wallet, market, side, price, size, postOnly = false, acknowledgePriceRisk = false, expiresInSeconds = null }) {
         const walletPk = parseWallet(wallet);
         if (side !== 'buy' && side !== 'sell') throw new UserError('side must be buy or sell');
         const tokenPrice = Number(price);
         if (!(tokenPrice > 0)) throw new UserError('Enter a price above zero');
 
-        // A bid far above the market (or an ask far below) is filled at the user's own price,
-        // by the book or by arbitrageurs, so it needs an explicit OK (the order form warns first).
-        if (this.referencePrice && !acknowledgePriceRisk) {
-            const reference = await this.referencePrice(market).catch(() => null);
-            const off = adverseDeviation(side, tokenPrice, reference);
-            if (off != null && off > PRICE_WARN_DEVIATION) {
-                const err = new UserError(`This ${side} price is ${(off * 100).toFixed(1)}% ${side === 'buy' ? 'above' : 'below'} the market price (${reference.toPrecision(6)}). Confirm the price warning to place it anyway.`);
-                err.code = 'PRICE_DEVIATION';
-                throw err;
-            }
-        }
+        await this.checkPriceRisk(market, side, tokenPrice, acknowledgePriceRisk);
 
         const ctx = await this.loadContext(walletPk, market);
         if (!ctx.freeNonces.length) return this.prepareNonceSetup(walletPk);
@@ -279,6 +273,15 @@ export class OrderService {
             throw new UserError(`Insufficient balance: this order needs ${formatAtoms(depositAtoms, econ.lockMint === 'base' ? ctx.baseDecimals : ctx.quoteDecimals)} more ${isNativeMint(lockMint) ? 'SOL (plus ~0.01 for fees)' : 'tokens'}.`);
         }
 
+        // Optional expiry: Manifest drops the order after this slot.
+        let lastValidSlot = 0, expiresAt = null;
+        if (expiresInSeconds != null) {
+            const secs = Number(expiresInSeconds);
+            if (!(secs >= 60 && secs <= MAX_EXPIRY_SECONDS)) throw new UserError('Pick an expiry between 1 minute and 30 days');
+            lastValidSlot = (await connection.getSlot('confirmed')) + Math.ceil(secs / SLOT_SECONDS);
+            expiresAt = Date.now() + secs * 1000;
+        }
+
         // ----- place transaction (user pays) -----
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
         const place = new Transaction({ feePayer: walletPk, blockhash, lastValidBlockHeight });
@@ -296,7 +299,7 @@ export class OrderService {
             baseMint: ctx.baseMint, quoteMint: ctx.quoteMint,
             baseTokenProgram: ctx.baseTokenProgram, quoteTokenProgram: ctx.quoteTokenProgram,
             globals: ctx.globals,
-            place: [{ baseAtoms, mantissa: encoded.mantissa, exponent: encoded.exponent, isBid, orderType: postOnly ? OrderType.PostOnly : OrderType.Limit }],
+            place: [{ baseAtoms, mantissa: encoded.mantissa, exponent: encoded.exponent, isBid, orderType: postOnly ? OrderType.PostOnly : OrderType.Limit, lastValidSlot }],
         }));
         if (isNativeMint(ctx.baseMint) || isNativeMint(ctx.quoteMint)) place.add(unwrapSolIx({ owner: walletPk }));
 
@@ -342,6 +345,8 @@ export class OrderService {
             proceedsIsBase: econ.proceedsMint === 'base',
             claimAtoms: econ.claimAtoms.toString(),
             nonce: nonce.address,
+            lastValidSlot: lastValidSlot || null,
+            expiresAt,
         };
         this.pending.set(id, {
             kind: 'order', wallet: order.wallet, createdAt: Date.now(), order,
@@ -361,6 +366,21 @@ export class OrderService {
                 depositAtoms: depositAtoms.toString(),
             },
         };
+    }
+
+    /**
+     * A bid far above the market (or an ask far below) is filled at the user's own price, by the
+     * book or by arbitrageurs, so it needs an explicit OK (the order form warns first).
+     */
+    async checkPriceRisk(market, side, tokenPrice, acknowledged) {
+        if (!this.referencePrice || acknowledged) return;
+        const reference = await this.referencePrice(market).catch(() => null);
+        const off = adverseDeviation(side, tokenPrice, reference);
+        if (off != null && off > PRICE_WARN_DEVIATION) {
+            const err = new UserError(`This ${side} price is ${(off * 100).toFixed(1)}% ${side === 'buy' ? 'above' : 'below'} the market price (${reference.toPrecision(6)}). Confirm the price warning to place it anyway.`);
+            err.code = 'PRICE_DEVIATION';
+            throw err;
+        }
     }
 
     buildClaim({ walletPk, nonce, market, proceedsMint, proceedsProgram, claimAtoms }) {
@@ -432,6 +452,10 @@ export class OrderService {
         const started = Date.now();
         try {
             const result = await this.submitInner(body);
+            // Our own transaction just changed the market: re-read it now so the book and the
+            // wallet's order list are right on the next refresh, not one poll later.
+            const market = pending?.order?.market || pending?.market;
+            if (market) await this.markets.refresh(market).catch(() => {});
             if (pending) {
                 log.info('orders', `${pending.kind}_ok`, {
                     wallet: short(pending.wallet), ...describePending(pending), order: result.orderId, sig: result.signature, ms: Date.now() - started,
@@ -479,6 +503,12 @@ export class OrderService {
             return { ok: true, signature, refundedSol: pending.refundLamports / 1e9 };
         }
 
+        if (pending.kind === 'cancelAll') {
+            const signature = await this.send(txs[0], pending);
+            for (const orderId of pending.orderIds) this.store.update(orderId, { status: 'cancelled', cancelSignature: signature });
+            return { ok: true, signature, cancelled: pending.orderIds.length };
+        }
+
         if (pending.kind === 'cancel' || pending.kind === 'withdraw') {
             const signature = await this.send(txs[0], pending);
             if (pending.orderId) this.store.update(pending.orderId, { status: 'cancelled', cancelSignature: signature });
@@ -490,6 +520,12 @@ export class OrderService {
             throw new UserError('Your payout accounts were refunded, please place the order again.');
         }
         const [place, claim] = txs;
+        // An edit replaces an order: keep the keeper off the old one while the swap lands.
+        const replaced = pending.replaces ? this.store.get(pending.replaces) : null;
+        if (replaced) {
+            if (replaced.status !== 'open') throw new UserError(`The original order is ${replaced.status} now; nothing was changed.`);
+            this.store.update(replaced.id, { status: 'replacing' });
+        }
         const order = this.store.put({
             ...pending.order,
             status: 'placing',
@@ -501,8 +537,10 @@ export class OrderService {
             signature = await this.send(place, pending);
         } catch (err) {
             this.store.update(order.id, { status: 'failed', error: err.message });
+            if (replaced) this.store.update(replaced.id, { status: 'open' });
             throw err;
         }
+        if (replaced) this.store.update(replaced.id, { status: 'cancelled', replacedBy: order.id, cancelSignature: signature });
         if (pending.replenishNonce) this.store.addNonce(pending.replenishNonce, pending.wallet);
 
         const tx = await connection.getTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
@@ -740,9 +778,10 @@ export class OrderService {
         const walletPk = parseWallet(wallet);
         const order = this.store.get(orderId);
         if (!order || order.wallet !== walletPk.toBase58()) throw new UserError('Order not found');
-        if (order.status !== 'open') throw new UserError(`Order is ${order.status}`);
+        if (order.status !== 'open' && order.status !== 'expired') throw new UserError(`Order is ${order.status}`);
         const ctx = await this.loadContext(walletPk, order.market);
-        const onBook = order.sequenceNumber && [...ctx.market.bids(), ...ctx.market.asks()]
+        // Expired orders are hidden by the SDK but still hold funds until cancelled.
+        const onBook = order.sequenceNumber && this.markets.allOrders(order.market)
             .some(o => o.sequenceNumber.toString() === order.sequenceNumber);
 
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
@@ -759,8 +798,154 @@ export class OrderService {
         }
         await this.appendWithdrawAll(tx, walletPk, ctx, { excludeOrderId: order.id });
         const id = crypto.randomUUID();
-        this.pending.set(id, { kind: 'cancel', orderId, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight });
+        this.pending.set(id, { kind: 'cancel', orderId, market: order.market, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight });
         return { step: 'sign', id, transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')], summary: { title: 'Cancel order', detail: 'Cancels the order and returns its funds to your wallet.' } };
+    }
+
+    /**
+     * Change an open order's price and/or size in ONE transaction: cancel it, place the new one,
+     * return the old order's partial-fill proceeds and any surplus to the wallet, and sign a new
+     * payout. The old payout is voided by advancing its nonce.
+     */
+    async prepareEdit({ wallet, orderId, price, size, acknowledgePriceRisk = false }) {
+        const walletPk = parseWallet(wallet);
+        const old = this.store.get(orderId);
+        if (!old || old.wallet !== walletPk.toBase58()) throw new UserError('Order not found');
+        if (old.status !== 'open') throw new UserError(`Order is ${old.status}`);
+        const tokenPrice = Number(price);
+        if (!(tokenPrice > 0)) throw new UserError('Enter a price above zero');
+        await this.checkPriceRisk(old.market, old.side, tokenPrice, acknowledgePriceRisk);
+
+        const ctx = await this.loadContext(walletPk, old.market);
+        const resting = this.markets.allOrders(old.market).find(o => o.sequenceNumber.toString() === old.sequenceNumber);
+        if (!resting) throw new UserError('This order has already filled or left the book.');
+        if (old.lastValidSlot && this.markets.slot > old.lastValidSlot) throw new UserError('This order has expired; withdraw it instead.');
+        const nonce = ctx.freeNonces.find(n => n.address !== old.nonce);
+        if (!nonce) throw new UserError('No spare payout account for the edited order. Cancel it and place a new one.');
+
+        const isBid = old.isBid;
+        const baseAtoms = toAtoms(size, ctx.baseDecimals);
+        if (baseAtoms <= 0n) throw new UserError('Order size is too small');
+        let encoded;
+        try {
+            encoded = encodePrice(tokenPrice, ctx.baseDecimals, ctx.quoteDecimals);
+        } catch (err) {
+            throw new UserError(err.message);
+        }
+        const econ = orderEconomics({ isBid, baseAtoms, mantissa: encoded.mantissa, exponent: encoded.exponent });
+        const lockIsBase = econ.lockMint === 'base';
+        const lockMint = lockIsBase ? ctx.baseMint : ctx.quoteMint;
+        const lockProgram = lockIsBase ? ctx.baseTokenProgram : ctx.quoteTokenProgram;
+        const proceedsMint = lockIsBase ? ctx.quoteMint : ctx.baseMint;
+        const proceedsProgram = lockIsBase ? ctx.quoteTokenProgram : ctx.baseTokenProgram;
+
+        // What the cancel releases, and the old order's own proceeds from partial fills.
+        const remaining = BigInt(resting.numBaseAtoms.toString());
+        const oldLock = isBid ? quoteForBase(old.mantissa, old.exponent, remaining, true) : remaining;
+        const filled = BigInt(old.baseAtoms) - remaining;
+        const oldProceeds = filled > 0n ? (isBid ? filled : quoteForBase(old.mantissa, old.exponent, filled, false)) : 0n;
+        // Free funds already in the seat, minus what other orders' payouts are counting on.
+        const seat = ctx.market.hasSeat(walletPk);
+        const freeLock = seat ? BigInt(ctx.market.getWithdrawableBalanceAtoms(walletPk, lockIsBase).toString()) : 0n;
+        const reserved = claimReservations(this.store, walletPk.toBase58(), old.market, ctx.market, old.id);
+        const reservedLock = lockIsBase ? reserved.base : reserved.quote;
+        const available = (freeLock > reservedLock ? freeLock - reservedLock : 0n) + oldLock;
+        const depositAtoms = econ.lockAtoms > available ? econ.lockAtoms - available : 0n;
+        const surplus = available > econ.lockAtoms ? available - econ.lockAtoms : 0n;
+
+        if (depositAtoms > 0n) {
+            const walletBalance = await this.tokenBalanceAtoms(walletPk, lockMint, lockProgram, ctx.lamports);
+            const solReserve = isNativeMint(lockMint) ? 10_000_000n : 0n;
+            if (depositAtoms + solReserve > walletBalance) {
+                throw new UserError(`Insufficient balance: the bigger order needs ${formatAtoms(depositAtoms, lockIsBase ? ctx.baseDecimals : ctx.quoteDecimals)} more ${isNativeMint(lockMint) ? 'SOL (plus ~0.01 for fees)' : 'tokens'}.`);
+            }
+        }
+
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+        const tx = new Transaction({ feePayer: walletPk, blockhash, lastValidBlockHeight });
+        tx.add(...priorityIxs(PLACE_CU));
+        tx.add(ataIx({ payer: walletPk, owner: walletPk, mint: ctx.baseMint, tokenProgram: ctx.baseTokenProgram }));
+        tx.add(ataIx({ payer: walletPk, owner: walletPk, mint: ctx.quoteMint, tokenProgram: ctx.quoteTokenProgram }));
+        // Voids the old order's pre-signed payout.
+        tx.add(SystemProgram.nonceAdvance({ noncePubkey: new PublicKey(old.nonce), authorizedPubkey: walletPk }));
+        if (isNativeMint(lockMint) && depositAtoms > 0n) tx.add(...wrapSolIxs({ owner: walletPk, lamports: depositAtoms }));
+        if (depositAtoms > 0n) tx.add(depositIx({ trader: walletPk, market: old.market, mint: lockMint, tokenProgram: lockProgram, amountAtoms: depositAtoms }));
+        tx.add(batchUpdateIx({
+            trader: walletPk, market: old.market,
+            baseMint: ctx.baseMint, quoteMint: ctx.quoteMint,
+            baseTokenProgram: ctx.baseTokenProgram, quoteTokenProgram: ctx.quoteTokenProgram,
+            globals: ctx.globals,
+            cancel: [old.sequenceNumber],
+            place: [{ baseAtoms, mantissa: encoded.mantissa, exponent: encoded.exponent, isBid, orderType: old.postOnly ? OrderType.PostOnly : OrderType.Limit, lastValidSlot: old.lastValidSlot || 0 }],
+        }));
+        if (surplus > 0n) tx.add(withdrawIx({ trader: walletPk, market: old.market, mint: lockMint, tokenProgram: lockProgram, amountAtoms: surplus }));
+        if (oldProceeds > 0n) tx.add(withdrawIx({ trader: walletPk, market: old.market, mint: proceedsMint, tokenProgram: proceedsProgram, amountAtoms: oldProceeds }));
+        if (isNativeMint(ctx.baseMint) || isNativeMint(ctx.quoteMint)) tx.add(unwrapSolIx({ owner: walletPk }));
+        await this.simulateOrThrow(tx);
+
+        const claim = this.buildClaim({ walletPk, nonce, market: old.market, proceedsMint, proceedsProgram, claimAtoms: econ.claimAtoms });
+        const id = crypto.randomUUID();
+        const order = {
+            ...Object.fromEntries(Object.entries(old).filter(([k]) => ['wallet', 'venue', 'market', 'baseMint', 'quoteMint', 'baseDecimals', 'quoteDecimals', 'side', 'isBid', 'postOnly', 'lastValidSlot', 'expiresAt'].includes(k))),
+            id,
+            price: encoded.effectiveTokenPrice,
+            baseAtoms: baseAtoms.toString(),
+            mantissa: encoded.mantissa,
+            exponent: encoded.exponent,
+            lockMint,
+            lockAtoms: econ.lockAtoms.toString(),
+            proceedsMint,
+            proceedsIsBase: !lockIsBase,
+            claimAtoms: econ.claimAtoms.toString(),
+            nonce: nonce.address,
+            replaces: old.id,
+        };
+        this.pending.set(id, {
+            kind: 'order', wallet: order.wallet, createdAt: Date.now(), order, replaces: old.id,
+            messages: [tx.serializeMessage(), claim.serializeMessage()],
+            blockhash, lastValidBlockHeight, replenishNonce: null,
+        });
+        return {
+            step: 'sign',
+            id,
+            transactions: [tx, claim].map(t => t.serialize({ requireAllSignatures: false }).toString('base64')),
+            summary: { title: 'Edit order', detail: 'Replaces the order and its automatic payout in one approval.' },
+        };
+    }
+
+    /** Cancel the wallet's open (and expired) orders on a market and withdraw everything. */
+    async prepareCancelAll({ wallet, market }) {
+        const walletPk = parseWallet(wallet);
+        const all = this.store.forWallet(walletPk.toBase58())
+            .filter(o => o.market === market && (o.status === 'open' || o.status === 'expired'));
+        if (!all.length) throw new UserError('No open orders on this market');
+        const batch = all.slice(0, CANCEL_ALL_MAX); // transaction size limit; the rest on a second click
+        const ctx = await this.loadContext(walletPk, market);
+        const onBook = new Set(this.markets.allOrders(market).map(o => o.sequenceNumber.toString()));
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+        const tx = new Transaction({ feePayer: walletPk, blockhash, lastValidBlockHeight });
+        tx.add(...priorityIxs(CANCEL_CU + 25_000 * batch.length));
+        for (const o of batch) tx.add(SystemProgram.nonceAdvance({ noncePubkey: new PublicKey(o.nonce), authorizedPubkey: walletPk }));
+        const seqs = batch.map(o => o.sequenceNumber).filter(seq => seq && onBook.has(seq));
+        if (seqs.length) {
+            tx.add(batchUpdateIx({
+                trader: walletPk, market, baseMint: ctx.baseMint, quoteMint: ctx.quoteMint,
+                baseTokenProgram: ctx.baseTokenProgram, quoteTokenProgram: ctx.quoteTokenProgram,
+                globals: ctx.globals, cancel: seqs,
+            }));
+        }
+        await this.appendWithdrawAll(tx, walletPk, ctx, { excludeOrderId: new Set(batch.map(o => o.id)) });
+        const id = crypto.randomUUID();
+        this.pending.set(id, {
+            kind: 'cancelAll', orderIds: batch.map(o => o.id), market, wallet: walletPk.toBase58(), createdAt: Date.now(),
+            messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight,
+        });
+        return {
+            step: 'sign', id,
+            transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')],
+            remaining: all.length - batch.length,
+            summary: { title: `Cancel ${batch.length} order${batch.length === 1 ? '' : 's'}`, detail: 'Cancels them and returns their funds to your wallet.' },
+        };
     }
 
     /** Withdraw everything this wallet has sitting in a market (partial fills, leftovers). */
@@ -773,7 +958,7 @@ export class OrderService {
         const added = await this.appendWithdrawAll(tx, walletPk, ctx);
         if (!added) throw new UserError('Nothing to withdraw on this market');
         const id = crypto.randomUUID();
-        this.pending.set(id, { kind: 'withdraw', wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight });
+        this.pending.set(id, { kind: 'withdraw', market, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight });
         return { step: 'sign', id, transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')], summary: { title: 'Withdraw to wallet', detail: 'Moves your filled proceeds and leftovers back to your wallet.' } };
     }
 

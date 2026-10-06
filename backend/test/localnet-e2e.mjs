@@ -324,6 +324,64 @@ await test('Orders priced >5% through the market need explicit consent', async (
     }
 });
 
+await test('Edit a partly filled order: new price and size, old proceeds and surplus returned, new one pays out', async () => {
+    const wallet = maker.publicKey.toBase58();
+    const order = await placeOrder({ market: mBQ, side: 'sell', price: '3', size: '10' });
+    await swap(mBQ, { baseIn: false, inAtoms: 6_000_000n }); // buys 2 BASE at 3
+    await sleep(2500);
+    const baseBefore = await tokenBalance(maker.publicKey, BASE), quoteBefore = await tokenBalance(maker.publicKey, QUOTE);
+    const prepared = await service.prepareEdit({ wallet, orderId: order.id, price: '4', size: '5' });
+    const res = await signAndSubmit(prepared);
+    const fresh = store.get(res.orderId), old = store.get(order.id);
+    log('old', old.status, 'replacedBy', old.replacedBy?.slice(0, 8), '| new', fresh.status, fresh.price, fresh.baseAtoms);
+    assert.equal(old.status, 'cancelled');
+    assert.equal(old.replacedBy, fresh.id);
+    assert.equal(fresh.status, 'open');
+    const baseBack = await tokenBalance(maker.publicKey, BASE) - baseBefore;
+    const quoteBack = await tokenBalance(maker.publicKey, QUOTE) - quoteBefore;
+    log('returned: base', baseBack, 'quote', quoteBack);
+    assert.equal(baseBack, 3_000_000n, '8 BASE were left; 5 stay on the book, 3 come back');
+    assert.ok(quoteBack >= 6_000_000n - 10n && quoteBack <= 6_000_100n, `the 2 BASE sold at 3 paid out (got ${quoteBack})`);
+    // The old payout is void (its nonce was advanced).
+    const stale = Transaction.from(Buffer.from(order.claimTx, 'base64'));
+    stale.partialSign(keeper);
+    await assert.rejects(connection.sendRawTransaction(stale.serialize()));
+    // The new order pays out on fill.
+    const q2 = await tokenBalance(maker.publicKey, QUOTE);
+    await swap(mBQ, { baseIn: false, inAtoms: 25_000_000n });
+    await waitFor(() => store.get(fresh.id).status === 'claimed', 'claim of edited order');
+    assert.ok(await tokenBalance(maker.publicKey, QUOTE) - q2 >= 20_000_000n - 10n, 'edited order paid 5 x 4');
+});
+
+await test('Cancel all cancels every order on the market and returns the funds', async () => {
+    const wallet = maker.publicKey.toBase58();
+    const baseBefore = await tokenBalance(maker.publicKey, BASE);
+    const a = await placeOrder({ market: mBQ, side: 'sell', price: '40', size: '1' });
+    const b = await placeOrder({ market: mBQ, side: 'sell', price: '41', size: '2' });
+    const res = await signAndSubmit(await service.prepareCancelAll({ wallet, market: mBQ }));
+    log('cancelled', res.cancelled);
+    assert.ok(res.cancelled >= 2);
+    assert.equal(store.get(a.id).status, 'cancelled');
+    assert.equal(store.get(b.id).status, 'cancelled');
+    assert.equal(await tokenBalance(maker.publicKey, BASE), baseBefore, 'all 3 BASE back in the wallet');
+    await assert.rejects(service.prepareCancelAll({ wallet, market: mBQ }), /No open orders/);
+});
+
+await test('An expired order is marked expired and its funds come back with one withdraw', async () => {
+    const wallet = maker.publicKey.toBase58();
+    const baseBefore = await tokenBalance(maker.publicKey, BASE);
+    let prepared = await service.prepareOrder({ wallet, market: mBQ, side: 'sell', price: '60', size: '1', expiresInSeconds: 60 });
+    if (prepared.step === 'setup') { await signAndSubmit(prepared); prepared = await service.prepareOrder({ wallet, market: mBQ, side: 'sell', price: '60', size: '1', expiresInSeconds: 60 }); }
+    const order = store.get((await signAndSubmit(prepared)).orderId);
+    assert.ok(order.lastValidSlot > 0 && order.expiresAt > Date.now());
+    log('waiting for slot', order.lastValidSlot, '…');
+    await waitFor(() => store.get(order.id).status === 'expired', 'keeper marks it expired', 120_000);
+    assert.equal(await tokenBalance(maker.publicKey, BASE), baseBefore - 1_000_000n, 'funds still locked until withdrawn');
+    await signAndSubmit(await service.prepareCancel({ wallet, orderId: order.id }));
+    assert.equal(store.get(order.id).status, 'cancelled');
+    assert.equal(await tokenBalance(maker.publicKey, BASE), baseBefore, 'the 1 BASE is back');
+});
+
 await sleep(1000);
 console.log(failures ? `\n${failures} test(s) FAILED` : '\nAll tests passed');
 fs.rmSync(dataDir, { recursive: true, force: true });

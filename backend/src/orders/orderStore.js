@@ -10,6 +10,8 @@ import { log } from '../log.js';
 const FILE = path.join(config.dataDir, 'orders.json');
 
 export const ACTIVE_STATUSES = new Set(['open', 'claiming']);
+// An expired order still holds its funds (and its payout account) until the owner withdraws it.
+const NONCE_HOLDING = new Set([...ACTIVE_STATUSES, 'expired', 'replacing']);
 
 export class OrderStore {
     constructor() {
@@ -77,7 +79,7 @@ export class OrderStore {
 
     /** Nonce accounts currently backing a live claim. */
     noncesInUse(wallet) {
-        return new Set(this.forWallet(wallet).filter(o => ACTIVE_STATUSES.has(o.status)).map(o => o.nonce));
+        return new Set(this.forWallet(wallet).filter(o => NONCE_HOLDING.has(o.status)).map(o => o.nonce));
     }
 }
 
@@ -88,8 +90,9 @@ export class OrderStore {
 export function claimReservations(store, wallet, marketAddress, market, excludeOrderId) {
     const remaining = new Map([...market.bids(), ...market.asks()].map(o => [o.sequenceNumber.toString(), BigInt(o.numBaseAtoms.toString())]));
     const out = { base: 0n, quote: 0n };
+    const excluded = excludeOrderId instanceof Set ? excludeOrderId : new Set([excludeOrderId]);
     for (const o of store.active()) {
-        if (o.wallet !== wallet || o.market !== marketAddress || o.id === excludeOrderId) continue;
+        if (o.wallet !== wallet || o.market !== marketAddress || excluded.has(o.id)) continue;
         const total = BigInt(o.baseAtoms);
         const left = o.sequenceNumber && remaining.has(o.sequenceNumber) ? remaining.get(o.sequenceNumber) : 0n;
         const filled = total > left ? total - left : 0n;

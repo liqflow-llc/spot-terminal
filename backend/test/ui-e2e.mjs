@@ -3,7 +3,8 @@
 // validator running the real Manifest program. Places a sell order through the UI, fills it
 // from a taker, and checks the UI reports it as paid out.
 //
-// Prereqs: local validator as in localnet-e2e.mjs; `npm run build` in frontend/.
+// Prereqs: local validator as in localnet-e2e.mjs; a test build of the frontend:
+//   (cd frontend && npx vite build --outDir dist-test)   (never the production dist/)
 // Run from backend/: node test/ui-e2e.mjs [path-to-chrome]
 import fs from 'fs';
 import os from 'os';
@@ -57,7 +58,8 @@ const keeper = Keypair.generate();
 fs.writeFileSync(keeperPath, JSON.stringify([...keeper.secretKey]));
 await airdrop(keeper.publicKey, 2);
 const backend = spawn(process.execPath, [path.join(here, '../src/server.js')], {
-    env: { ...process.env, RPC_URL: RPC, WS_URL: 'ws://127.0.0.1:8900', DATA_DIR: dataDir, PORT: String(PORT), KEEPER_KEYPAIR: keeperPath },
+    // Serves the test build (frontend/dist-test), never the production one.
+    env: { ...process.env, RPC_URL: RPC, WS_URL: 'ws://127.0.0.1:8900', DATA_DIR: dataDir, PORT: String(PORT), KEEPER_KEYPAIR: keeperPath, FRONTEND_DIST: path.join(here, '../../frontend/dist-test') },
     stdio: ['ignore', 'pipe', 'pipe'],
 });
 let backendLog = '';
@@ -149,6 +151,12 @@ try {
         await page.waitForFunction((sel, t) => [...document.querySelectorAll(sel)].some(el => el.textContent.trim().includes(t)), { timeout: 20000 }, selector, text);
         await page.evaluate((sel, t) => [...document.querySelectorAll(sel)].find(el => el.textContent.trim().includes(t)).click(), selector, text);
     };
+    // Addresses are pasted, like people do. (Typing 44 characters with simulated key presses in
+    // headless Chrome sometimes loses keystrokes without the page losing focus: a harness quirk.)
+    const paste = (selector, text) => page.$eval(selector, (el, t) => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, t);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+    }, text);
     const shot = async (name) => {
         const file = path.join(shotsDir, `${name}.png`);
         await page.screenshot({ path: file });
@@ -265,7 +273,7 @@ try {
     await page.keyboard.press('Escape');
     await page.click('.selector-btn');
     await page.waitForSelector('.selector-search');
-    await page.type('.selector-search', NEW_TOKEN.toBase58());
+    await paste('.selector-search', NEW_TOKEN.toBase58());
     await clickText('.selector-create button', '/SOL');
     await page.waitForFunction(() => document.querySelector('.modal')?.textContent.includes('SOL (network rent'), { timeout: 30000 });
     await shot('5-create-market');
@@ -296,9 +304,11 @@ try {
     await page.waitForSelector('.selector-create-any', { timeout: 20000 });
     await page.click('.selector-create-any');
     await page.waitForSelector('#cm-base');
-    await page.type('#cm-base', NEW_TOKEN2.toBase58());
+    await paste('#cm-base', NEW_TOKEN2.toBase58());
+    await page.waitForSelector('.cm-token', { timeout: 20000 }); // base token looked up
     await clickText('.cm-chip', 'Other token');
-    await page.type('.cm-form input:not(#cm-base)', QUOTE.toBase58());
+    await page.waitForSelector('.cm-form input:not(#cm-base)');
+    await paste('.cm-form input:not(#cm-base)', QUOTE.toBase58());
     await page.waitForFunction(() => document.querySelectorAll('.cm-token').length === 2, { timeout: 20000 });
     await clickText('.modal button', 'Continue');
     await page.waitForFunction(() => document.querySelector('.modal')?.textContent.includes('network rent'), { timeout: 30000 });
@@ -313,6 +323,39 @@ try {
     step('Quote filter returns only that quote token\'s pairs');
     const solOnly = await (await fetch(`${base}/api/markets?quote=So11111111111111111111111111111111111111112&q=${NEW_TOKEN.toBase58()}`)).json();
     if (!solOnly.markets.length || solOnly.markets.some(m => m.quote.symbol !== 'SOL')) throw new Error(`SOL filter wrong: ${JSON.stringify(solOnly).slice(0, 200)}`);
+
+    step('Open orders: place with an expiry, edit the price, then cancel all');
+    await page.goto(`${base}/trade/${market}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.selector-btn .pair-name', { timeout: 20000 });
+    const placeSell = async (price, amount, expiry) => {
+        await clickText('.of-side', 'Sell');
+        await setField('Price', price);
+        await setField('Amount', amount);
+        if (expiry) await page.select('.of-expiry select', expiry);
+        await sleep(300);
+        await clickText('.of-submit', 'Sell');
+        // After the refund earlier, the next order asks for the deposit again.
+        const setup = await page.waitForFunction(() => document.querySelector('.modal')?.textContent.includes('deposit') || [...document.querySelectorAll('.toast-title')].some(t => t.textContent.includes('order placed')), { timeout: 60000 });
+        if (await page.evaluate(() => !!document.querySelector('.modal'))) await clickText('.modal button', 'Continue');
+        await page.waitForFunction((p) => [...document.querySelectorAll('.ap-table tbody tr')].some(r => r.textContent.includes(p) && r.textContent.includes('Open')), { timeout: 60000 }, price);
+    };
+    await clickText('.tab', 'Open orders');
+    await placeSell('9', '1', '86400');
+    const expiresCell = await page.evaluate(() => [...document.querySelectorAll('.ap-table tbody tr')].find(r => r.textContent.includes('9.0'))?.textContent || '');
+    if (!/23h|1d/.test(expiresCell)) throw new Error(`expiry not shown: ${expiresCell}`);
+    await page.evaluate(() => [...document.querySelectorAll('.ap-table tbody tr')].find(r => r.textContent.includes('9.0')).querySelector('button').click());
+    await page.waitForSelector('.edit-order');
+    const priceInput = await page.$('.edit-order input');
+    await priceInput.click({ clickCount: 3 });
+    await priceInput.type('9.5');
+    await clickText('.modal button', 'Save');
+    await page.waitForFunction(() => [...document.querySelectorAll('.toast-title')].some(t => t.textContent.includes('Order updated')), { timeout: 60000 });
+    await page.waitForFunction(() => [...document.querySelectorAll('.ap-table tbody tr')].some(r => r.textContent.includes('9.5') && r.textContent.includes('Open')), { timeout: 30000 });
+    await placeSell('11', '1');
+    await shot('6c-open-orders');
+    await clickText('.panel-title button', 'Cancel all');
+    await page.waitForFunction(() => [...document.querySelectorAll('.toast-title')].some(t => t.textContent.includes('Orders cancelled')), { timeout: 60000 });
+    await page.waitForFunction(() => document.querySelector('.ap-body')?.textContent.includes('No open orders'), { timeout: 30000 });
 
     step('Terms and Privacy pages render');
     for (const [path, heading] of [['/terms', 'Terms of Service'], ['/privacy', 'Privacy Policy']]) {

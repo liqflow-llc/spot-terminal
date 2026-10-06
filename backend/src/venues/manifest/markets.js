@@ -228,6 +228,17 @@ export class ManifestMarkets extends EventEmitter {
 
     // ---------- queries ----------
 
+    /**
+     * Every resting order on a market INCLUDING expired ones. Market.bids()/asks() hide expired
+     * orders, but they still hold their owner's funds on-chain until cancelled.
+     */
+    allOrders(address) {
+        const raw = this.raw.get(address);
+        if (!raw) return [];
+        const m = Market.loadFromBuffer({ address: new PublicKey(address), buffer: raw }); // no slot: nothing filtered
+        return [...m.bids(), ...m.asks()];
+    }
+
     get(address) {
         return this.markets.get(address) || null;
     }

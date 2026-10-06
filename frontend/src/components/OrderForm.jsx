@@ -21,6 +21,7 @@ const PERCENTS = [25, 50, 75, 100];
 const WARN_DEVIATION = 0.05;
 const SLOW_FILL_DEVIATION = 0.2;
 const REFERENCE_REFRESH_MS = 30_000;
+const EXPIRIES = [['Never (until cancelled)', ''], ['1 hour', 3600], ['1 day', 86400], ['7 days', 604800], ['30 days', 2592000]];
 
 /** How much worse than the market an order is on the side that loses money (negative = safe side). */
 function adverseDeviation(side, price, reference) {
@@ -37,6 +38,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
   const [price, setPrice] = useState('');
   const [amount, setAmount] = useState('');
   const [postOnly, setPostOnly] = useState(false);
+  const [expiry, setExpiry] = useState(''); // seconds, '' = good till cancelled
   const [busy, setBusy] = useState(null);
   const [setupPrompt, setSetupPrompt] = useState(null);
   const [riskPrompt, setRiskPrompt] = useState(null);
@@ -139,6 +141,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
   async function prepare(acknowledgePriceRisk) {
     return postJSON('/api/orders/prepare', {
       wallet: publicKey.toBase58(), market: market.address, side, price, size: amount, postOnly, acknowledgePriceRisk,
+      expiresInSeconds: expiry ? Number(expiry) : null,
     });
   }
 
@@ -240,6 +243,12 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
         ))}
       </div>
       <Field label="Total" unit={quote.symbol} value={total ? toInputString(total, quote.decimals) : ''} onChange={setTotal} />
+      <label className="of-expiry">
+        <span className="muted" title="An expired order stops trading; you then withdraw its funds with one tap">Expires</span>
+        <select value={expiry} onChange={e => setExpiry(e.target.value)}>
+          {EXPIRIES.map(([label, secs]) => <option key={label} value={secs}>{label}</option>)}
+        </select>
+      </label>
 
       {risky && (
         <div className="of-note danger" role="alert">

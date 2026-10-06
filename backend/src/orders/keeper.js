@@ -3,6 +3,7 @@
 // The keeper only ever adds its fee-payer signature to a transaction the user already signed;
 // that transaction withdraws to the user's own token account, so the keeper cannot redirect funds.
 import fs from 'fs';
+import { EventEmitter } from 'events';
 import { Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import { connection } from '../solana.js';
 import { config } from '../config.js';
@@ -23,8 +24,10 @@ export function loadKeeperKeypair() {
     return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(config.keeperKeypairPath, 'utf8'))));
 }
 
-export class Keeper {
+/** Emits 'claimed', 'expired', 'closed' and 'claim_failed' with the order (for notifications). */
+export class Keeper extends EventEmitter {
     constructor({ markets, store, keypair }) {
+        super();
         this.markets = markets;
         this.store = store;
         this.keypair = keypair;
@@ -77,7 +80,10 @@ export class Keeper {
             // Without a sequence number we can't tell whether the order is still resting, and the
             // seat may hold other funds, so never claim blind; the user can withdraw manually.
             if (!order.sequenceNumber) continue;
-            if (resting.has(order.sequenceNumber)) continue;
+            // Judged by slot, not by the book: an unchanged market account is never re-parsed, so the
+            // cached book can still list an order after its expiry slot.
+            const expired = order.lastValidSlot && slot > order.lastValidSlot;
+            if (!expired && resting.has(order.sequenceNumber)) continue;
 
             const wallet = new PublicKey(order.wallet);
             const balance = market.hasSeat(wallet)
@@ -89,6 +95,12 @@ export class Keeper {
             const free = balance - (order.proceedsIsBase ? reserved.base : reserved.quote);
             if (free >= BigInt(order.claimAtoms)) {
                 this.submitClaim(order);
+            } else if (expired) {
+                // Manifest keeps an expired order's funds locked until its owner cancels it, which
+                // needs their signature: the app shows a Withdraw button (and notifies them).
+                this.store.update(order.id, { status: 'expired', expiredAt: Date.now(), note: 'Expired: withdraw to get the funds back.' });
+                log.info('keeper', 'order_expired', { order: order.id, wallet: short(order.wallet), market: short(order.market) });
+                this.emit('expired', this.store.get(order.id));
             } else if (!order.missingSince) {
                 // Gone from the book without enough proceeds: cancelled elsewhere, expired, or
                 // partially filled then removed. The user can withdraw from the app.
@@ -96,6 +108,7 @@ export class Keeper {
             } else if (Date.now() - order.missingSince > 5 * 60 * 1000) {
                 this.store.update(order.id, { status: 'closed', note: 'Left the book without filling completely; withdraw any balance from the market.' });
                 log.warn('keeper', 'order_closed_unfilled', { order: order.id, wallet: short(order.wallet), market: short(order.market) });
+                this.emit('closed', this.store.get(order.id));
             }
         }
     }
@@ -118,6 +131,7 @@ export class Keeper {
             // Landed, so the nonce was unused: no cancel can have gone through first.
             this.store.update(order.id, { status: 'claimed', claimSignature: signature, claimedAt: Date.now() });
             log.info('keeper', 'claimed', { order: order.id, wallet: short(order.wallet), market: short(order.market), sig: signature });
+            this.emit('claimed', this.store.get(order.id));
         } catch (err) {
             const attempts = (order.claimAttempts || 0) + 1;
             log.error('keeper', 'claim_failed', { order: order.id, wallet: short(order.wallet), attempt: attempts, msg: errorDetail(err) });
@@ -128,6 +142,7 @@ export class Keeper {
                 claimAttempts: attempts,
                 error: err.message.slice(0, 300),
             });
+            if (attempts >= MAX_CLAIM_ATTEMPTS) this.emit('claim_failed', this.store.get(order.id));
         } finally {
             this.inFlight.delete(order.id);
         }

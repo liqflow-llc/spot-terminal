@@ -3,6 +3,7 @@ node_modules/
 data/
 logs/
 dist/
+dist-test/
 # Licensed TradingView bundle: copied in by scripts/setup-charting-library.sh, never committed
 frontend/public/charting_library/
 .DS_Store

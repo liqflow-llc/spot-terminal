@@ -347,8 +347,12 @@ app.get('/api/account', rateLimit('account', 40, 60_000), async (req, res) => {
         // Mark which open orders are still resting, with how much is left.
         const resting = new Map([...(market?.bids() || []), ...(market?.asks() || [])]
             .map(o => [o.sequenceNumber.toString(), Number(o.numBaseTokens)]));
+        // An order newer than our copy of the market isn't in it yet: unknown, not "filled".
+        const dataSlot = markets.dataSlots.get(address) ?? 0;
         for (const o of out.orders) {
-            if (o.market === address && o.sequenceNumber) o.remaining = resting.get(o.sequenceNumber) ?? 0;
+            if (o.market !== address || !o.sequenceNumber) continue;
+            if (resting.has(o.sequenceNumber)) o.remaining = resting.get(o.sequenceNumber);
+            else if (!(o.placeSlot && o.placeSlot > dataSlot)) o.remaining = 0;
         }
     }
     res.set('Cache-Control', 'no-cache');
@@ -398,6 +402,8 @@ const handle = (fn) => async (req, res) => {
 const writeLimit = rateLimit('write', 30, 60_000);
 app.post('/api/orders/prepare', writeLimit, handle(body => orders.prepareOrder(body)));
 app.post('/api/orders/cancel', writeLimit, handle(body => orders.prepareCancel(body)));
+app.post('/api/orders/edit', writeLimit, handle(body => orders.prepareEdit(body)));
+app.post('/api/orders/cancel-all', writeLimit, handle(body => orders.prepareCancelAll(body)));
 app.post('/api/orders/withdraw', writeLimit, handle(body => orders.prepareWithdraw(body)));
 app.post('/api/markets/create', writeLimit, handle(body => orders.prepareCreateMarket(body)));
 const quoteLimit = rateLimit('quote', 40, 60_000);
@@ -571,15 +577,24 @@ function renderIndex(html, req) {
         .replace(/<meta name="description"[^>]*>/, tags);
 }
 
-const dist = path.join(config.root, 'frontend', 'dist');
+// Tests point FRONTEND_DIST at a separate build so they never overwrite what production serves.
+const dist = process.env.FRONTEND_DIST || path.join(config.root, 'frontend', 'dist');
 if (fs.existsSync(dist)) {
-    const indexHtml = fs.readFileSync(path.join(dist, 'index.html'), 'utf8');
+    // Re-read index.html whenever it changes: it names the current hashed asset files, and a
+    // stale copy would point the page at scripts that no longer exist.
+    const indexPath = path.join(dist, 'index.html');
+    let indexCache = { mtimeMs: 0, html: '' };
+    const indexHtml = () => {
+        const { mtimeMs } = fs.statSync(indexPath);
+        if (mtimeMs !== indexCache.mtimeMs) indexCache = { mtimeMs, html: fs.readFileSync(indexPath, 'utf8') };
+        return indexCache.html;
+    };
     app.use(express.static(dist, { maxAge: '1h', index: false }));
     // Link previews (X, Telegram, Discord...) don't run JavaScript, so each page's title,
     // description and preview tags are filled in here; market links show the pair and price.
     app.get(/^\/(?!api\/).*/, (req, res) => {
         res.set('Cache-Control', 'no-cache');
-        res.type('html').send(renderIndex(indexHtml, req));
+        res.type('html').send(renderIndex(indexHtml(), req));
     });
 }
 

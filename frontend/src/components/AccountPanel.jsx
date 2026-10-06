@@ -7,8 +7,9 @@ import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing'
 import { formatAmount, formatDateTime, formatPrice } from '../utils/format';
 import { reportError } from '../services/report';
 import './AccountPanel.css';
+import EditOrderModal from './EditOrderModal.jsx';
 
-const OPEN = new Set(['placing', 'open', 'claiming']);
+const OPEN = new Set(['placing', 'open', 'claiming', 'expired', 'replacing']);
 const TABS = ['Open orders', 'Order history', 'Balances'];
 
 const STATUS = {
@@ -20,6 +21,8 @@ const STATUS = {
   closed: 'Closed',
   failed: 'Failed',
   claim_failed: 'Filled · withdraw needed',
+  expired: 'Expired · withdraw',
+  replacing: 'Updating',
 };
 
 export default function AccountPanel({ account, market, wallet, onChange }) {
@@ -28,6 +31,7 @@ export default function AccountPanel({ account, market, wallet, onChange }) {
   const toast = useToast();
   const [tab, setTab] = useState(TABS[0]);
   const [busy, setBusy] = useState(null);
+  const [editing, setEditing] = useState(null);
 
   const orders = account?.orders || [];
   const open = orders.filter(o => OPEN.has(o.status));
@@ -51,7 +55,9 @@ export default function AccountPanel({ account, market, wallet, onChange }) {
     }
   }
 
-  const cancel = (o) => run(o.id, { url: '/api/orders/cancel', body: { orderId: o.id } }, 'Order cancelled, funds returned');
+  const cancel = (o) => run(o.id, { url: '/api/orders/cancel', body: { orderId: o.id } }, o.status === 'expired' ? 'Withdrawn to wallet' : 'Order cancelled, funds returned');
+  const cancellable = open.filter(o => o.market === market?.address && (o.status === 'open' || o.status === 'expired'));
+  const cancelAll = () => run('cancel-all', { url: '/api/orders/cancel-all', body: { market: market.address } }, 'Orders cancelled, funds returned');
   const withdraw = () => run('withdraw', { url: '/api/orders/withdraw', body: { market: market.address } }, 'Withdrawn to wallet');
 
   return (
@@ -64,6 +70,11 @@ export default function AccountPanel({ account, market, wallet, onChange }) {
             </button>
           ))}
         </div>
+        {tab === 'Open orders' && cancellable.length > 1 && (
+          <button type="button" className="btn small" disabled={busy === 'cancel-all'} onClick={cancelAll} title="Cancel every open order on this market and return the funds">
+            {busy === 'cancel-all' ? '…' : `Cancel all (${cancellable.length})`}
+          </button>
+        )}
       </div>
       <div className="ap-body">
         {!wallet ? (
@@ -80,23 +91,34 @@ export default function AccountPanel({ account, market, wallet, onChange }) {
             orders={tab === 'Open orders' ? open : history}
             market={market}
             onCancel={tab === 'Open orders' ? cancel : null}
+            onEdit={tab === 'Open orders' ? setEditing : null}
             busy={busy}
             empty={tab === 'Open orders' ? 'No open orders' : 'No past orders yet'}
           />
         )}
       </div>
+      {editing && <EditOrderModal order={editing} onClose={() => setEditing(null)} onDone={onChange} />}
     </>
   );
 }
 
-function OrdersTable({ orders, market, onCancel, busy, empty }) {
+/** "3h 20m" / "2d 4h" until an order expires, or null. */
+function expiresIn(o) {
+  if (!o.expiresAt) return null;
+  const m = Math.max(1, Math.floor((o.expiresAt - Date.now()) / 60000));
+  if (m < 60) return `${m}m`;
+  if (m < 1440) return `${Math.floor(m / 60)}h ${m % 60}m`;
+  return `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`;
+}
+
+function OrdersTable({ orders, market, onCancel, onEdit, busy, empty }) {
   if (!orders.length) return <div className="ap-empty muted">{empty}</div>;
   return (
     <table className="ap-table">
       <thead>
         <tr>
           <th>Time</th><th>Pair</th><th>Side</th><th className="r">Price</th><th className="r">Amount</th>
-          <th className="r">Filled</th><th>Status</th><th />
+          <th className="r">Filled</th><th>Status</th>{onCancel && <th>Expires</th>}<th />
         </tr>
       </thead>
       <tbody>
@@ -115,10 +137,14 @@ function OrdersTable({ orders, market, onCancel, busy, empty }) {
                 <span className={`status ${o.status}`} title={o.error || o.note || ''}>{STATUS[o.status] || o.status}</span>
                 {link && <a className="tx-link" href={explorerTx(link)} target="_blank" rel="noreferrer">↗</a>}
               </td>
-              <td className="r">
-                {onCancel && o.status === 'open' && (
-                  <button type="button" className="btn small" disabled={busy === o.id} onClick={() => onCancel(o)}>
-                    {busy === o.id ? '…' : 'Cancel'}
+              {onCancel && <td className="num muted">{o.status === 'expired' ? 'expired' : (expiresIn(o) || 'never')}</td>}
+              <td className="r ap-actions">
+                {onEdit && o.status === 'open' && o.market === market?.address && (
+                  <button type="button" className="btn small" disabled={!!busy} onClick={() => onEdit(o)}>Edit</button>
+                )}
+                {onCancel && (o.status === 'open' || o.status === 'expired') && (
+                  <button type="button" className={`btn small ${o.status === 'expired' ? 'primary' : ''}`} disabled={busy === o.id} onClick={() => onCancel(o)}>
+                    {busy === o.id ? '…' : o.status === 'expired' ? 'Withdraw' : 'Cancel'}
                   </button>
                 )}
               </td>

@@ -13,3 +13,9 @@
 .tx-link { margin-left: 6px; }
 .ap-balances { display: flex; flex-direction: column; }
 .ap-withdraw { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; font-size: 12px; }
+.status.expired { color: var(--warn); }
+.status.replacing { color: var(--accent); }
+.ap-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.ap-actions .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.edit-order { display: flex; flex-direction: column; gap: 10px; min-width: min(360px, 80vw); }
+.edit-order .small { font-size: 12px; margin: 0; }
