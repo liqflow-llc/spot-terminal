@@ -1,0 +1,13 @@
+.cm-form { display: flex; flex-direction: column; gap: 6px; min-width: min(420px, 80vw); }
+.cm-label { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.cm-input { height: 36px; padding: 0 10px; background: var(--bg); border: 1px solid var(--border-2); border-radius: var(--radius); outline: none; font-family: var(--mono); font-size: 12px; }
+.cm-input:focus { border-color: var(--accent); }
+.cm-quotes { display: flex; flex-wrap: wrap; gap: 6px; }
+.cm-chip { height: 28px; padding: 0 10px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 14px; font-weight: 600; font-size: 12px; cursor: pointer; }
+.cm-chip:hover { border-color: var(--accent); }
+.cm-chip.active { border-color: var(--accent); background: var(--accent-bg); color: var(--text); }
+.cm-exists { color: var(--muted); font-weight: 400; }
+.cm-token { display: flex; align-items: center; gap: 6px; margin: 2px 0 0; font-size: 12px; flex-wrap: wrap; }
+.cm-note { margin: 2px 0 0; color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.cm-error { margin: 2px 0 0; color: var(--ask); font-size: 12px; }
+.cm-unverified { color: var(--warn); font-size: 11px; }

@@ -1,0 +1,165 @@
+import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useWallet } from '@solana/wallet-adapter-react';
+import { useWalletModal } from '@solana/wallet-adapter-react-ui';
+import Modal from './Modal.jsx';
+import TokenIcon from './TokenIcon.jsx';
+import { useToast } from './Toasts.jsx';
+import { getJSON, postJSON } from '../services/api';
+import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
+import { shortAddress } from '../utils/format';
+import './CreateMarketModal.css';
+
+const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const OTHER = 'other';
+
+/** Resolve a pasted mint to { token, quotes } via the backend, or an error message. */
+function useToken(mint) {
+  const [state, setState] = useState(null); // { mint, data } | { mint, error }
+  useEffect(() => {
+    const m = (mint || '').trim();
+    if (!MINT_RE.test(m)) { setState(null); return undefined; }
+    let live = true;
+    const t = setTimeout(() => getJSON(`/api/tokens/${m}`)
+      .then(data => live && setState({ mint: m, data }))
+      .catch(err => live && setState({ mint: m, error: err.message })), 250);
+    return () => { live = false; clearTimeout(t); };
+  }, [mint]);
+  return state?.mint === (mint || '').trim() ? state : null;
+}
+
+/**
+ * Create a Manifest market for any token against SOL, USDC, USDT or any other token.
+ * Opened with both tokens chosen (e.g. "Create SKIRM/SOL"), it goes straight to the cost step.
+ */
+export default function CreateMarketModal({ initialBase = '', initialQuote = null, onClose }) {
+  const { publicKey, signAllTransactions } = useWallet();
+  const { setVisible } = useWalletModal();
+  const toast = useToast();
+  const navigate = useNavigate();
+  const [baseInput, setBaseInput] = useState(initialBase);
+  const [quoteChoice, setQuoteChoice] = useState(initialQuote || 'SOL'); // a symbol from the list, or OTHER
+  const [otherInput, setOtherInput] = useState('');
+  const [stage, setStage] = useState({ step: 'form' }); // form | preparing | confirm | signing
+  const [error, setError] = useState(null);
+  const base = useToken(baseInput);
+  const other = useToken(quoteChoice === OTHER ? otherInput : '');
+
+  const quotes = base?.data?.quotes || [];
+  const presetQuote = quotes.find(q => q.symbol === quoteChoice) || null;
+  const quote = quoteChoice === OTHER
+    ? (other?.data ? { symbol: other.data.token.symbol, mint: other.data.token.mint, market: null, token: other.data.token } : null)
+    : presetQuote;
+  const sameToken = base?.data && quote && base.data.token.mint === quote.mint;
+  const ready = !!base?.data && !!quote && !sameToken;
+
+  const go = (address) => { onClose(); navigate(`/trade/${address}`); };
+
+  async function prepare() {
+    if (!publicKey) { setVisible(true); return; }
+    setError(null);
+    setStage({ step: 'preparing' });
+    try {
+      const prepared = await postJSON('/api/markets/create', { wallet: publicKey.toBase58(), baseMint: base.data.token.mint, quoteMint: quote.mint });
+      if (prepared.step === 'exists') return go(prepared.market);
+      setStage({ step: 'confirm', prepared });
+    } catch (err) {
+      setError(err.message);
+      setStage({ step: 'form' });
+    }
+  }
+
+  async function create() {
+    const { prepared } = stage;
+    setStage({ step: 'signing', prepared });
+    try {
+      const res = await signAndSubmit(prepared, signAllTransactions);
+      toast({ kind: 'success', title: `${base.data.token.symbol}/${quote.symbol} market created`, message: 'Place the first order to start the book.', link: explorerTx(res.signature) });
+      go(res.market);
+    } catch (err) {
+      if (!isUserRejection(err)) setError(err.message);
+      setStage({ step: 'confirm', prepared });
+    }
+  }
+
+  // Opened with both sides chosen: skip straight to the cost once the base token resolves.
+  const [autoStarted, setAutoStarted] = useState(false);
+  useEffect(() => {
+    if (autoStarted || !initialBase || !initialQuote || initialQuote === OTHER || !ready || !publicKey) return;
+    setAutoStarted(true);
+    if (presetQuote?.market) go(presetQuote.market); else prepare();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, publicKey]);
+
+  const pair = ready ? `${base.data.token.symbol}/${quote.symbol}` : null;
+  const busy = stage.step === 'preparing' || stage.step === 'signing';
+
+  return (
+    <Modal
+      title={pair && stage.step !== 'form' ? `Create ${pair} market` : 'Create a market'}
+      onClose={() => !busy && onClose()}
+      actions={(
+        <>
+          {stage.step === 'confirm' || stage.step === 'signing'
+            ? <button type="button" className="btn" disabled={busy} onClick={() => setStage({ step: 'form' })}>Back</button>
+            : <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>}
+          {stage.step === 'form' || stage.step === 'preparing' ? (
+            presetQuote?.market && quoteChoice !== OTHER
+              ? <button type="button" className="btn primary" onClick={() => go(presetQuote.market)}>Open {pair} market</button>
+              : <button type="button" className="btn primary" disabled={!ready || busy} onClick={prepare}>{stage.step === 'preparing' ? 'Preparing…' : publicKey ? 'Continue' : 'Connect wallet'}</button>
+          ) : (
+            <button type="button" className="btn primary" disabled={busy} onClick={create}>{stage.step === 'signing' ? 'Approve in your wallet…' : 'Create market'}</button>
+          )}
+        </>
+      )}
+    >
+      {stage.step === 'confirm' || stage.step === 'signing' ? (
+        <p>
+          Opens a new zero-fee {pair} order book on Manifest that anyone can trade. One-time cost of{' '}
+          <strong>{stage.prepared.summary.costSol.toFixed(4)} SOL</strong> (network rent, not refundable).
+        </p>
+      ) : (
+        <div className="cm-form">
+          <label className="cm-label" htmlFor="cm-base">Token to trade (base)</label>
+          <input id="cm-base" className="cm-input" placeholder="Paste the token's mint address" value={baseInput} onChange={e => setBaseInput(e.target.value.trim())} autoFocus={!initialBase} />
+          <TokenLine state={base} input={baseInput} />
+
+          <span className="cm-label">Priced in (quote)</span>
+          <div className="cm-quotes">
+            {(quotes.length ? quotes : [{ symbol: 'SOL' }, { symbol: 'USDC' }, { symbol: 'USDT' }]).map(q => (
+              <button key={q.symbol} type="button" className={`cm-chip ${quoteChoice === q.symbol ? 'active' : ''}`} onClick={() => setQuoteChoice(q.symbol)}>
+                {q.symbol}{q.market ? <span className="cm-exists"> · exists</span> : null}
+              </button>
+            ))}
+            <button type="button" className={`cm-chip ${quoteChoice === OTHER ? 'active' : ''}`} onClick={() => setQuoteChoice(OTHER)}>Other token…</button>
+          </div>
+          {quoteChoice === OTHER && (
+            <>
+              <input className="cm-input" placeholder="Paste the quote token's mint address" value={otherInput} onChange={e => setOtherInput(e.target.value.trim())} autoFocus />
+              <TokenLine state={other} input={otherInput} />
+            </>
+          )}
+          {sameToken && <p className="cm-error">Pick two different tokens.</p>}
+          {presetQuote?.market && quoteChoice !== OTHER && <p className="cm-note">This market already exists, so there&apos;s nothing to create.</p>}
+          {error && <p className="cm-error">{error}</p>}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function TokenLine({ state, input }) {
+  if (!input) return null;
+  if (!MINT_RE.test(input)) return <p className="cm-note">That doesn&apos;t look like a mint address.</p>;
+  if (!state) return <p className="cm-note"><span className="spinner" /> Looking up…</p>;
+  if (state.error) return <p className="cm-error">{state.error}</p>;
+  const t = state.data.token;
+  return (
+    <p className="cm-token">
+      <TokenIcon token={t} size={18} />
+      <strong>{t.symbol}</strong> <span className="muted">{t.name}</span>
+      {t.verified ? <span className="verified" title="On Jupiter's verified list">✓</span> : <span className="cm-unverified" title="Not on Jupiter's verified list: double-check the address">unverified</span>}
+      <span className="muted num">{shortAddress(t.mint)}</span>
+    </p>
+  );
+}

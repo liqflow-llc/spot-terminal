@@ -159,7 +159,13 @@ export class TradeStore extends EventEmitter {
     load() {
         try {
             const saved = JSON.parse(fs.readFileSync(FILE, 'utf8'));
-            for (const [market, rows] of Object.entries(saved)) this.candles.set(market, new Map(rows));
+            let dropped = 0;
+            for (const [market, rows] of Object.entries(saved)) {
+                const clean = sanitizeCandles(rows);
+                dropped += rows.length - clean.length;
+                this.candles.set(market, new Map(clean));
+            }
+            if (dropped) console.log(`TradeStore: dropped ${dropped} outlier candles`);
             console.log(`TradeStore: loaded 1m candles for ${this.candles.size} markets`);
         } catch {
             // First run.
@@ -182,4 +188,17 @@ export class TradeStore extends EventEmitter {
             console.error('TradeStore: save failed:', err.message);
         }
     }
+}
+
+/**
+ * Drop 1m candles wildly off the market's typical price (e.g. a mis-inferred trade against a
+ * dust order). Real moves of 20x within the 3 days we keep are not something to chart from
+ * single minutes anyway.
+ */
+const OUTLIER_FACTOR = 20;
+function sanitizeCandles(rows) {
+    const closes = rows.map(([, c]) => c[3]).filter(v => v > 0).sort((a, b) => a - b);
+    if (closes.length < 5) return rows;
+    const median = closes[Math.floor(closes.length / 2)];
+    return rows.filter(([, [, high, low]]) => low >= median / OUTLIER_FACTOR && high <= median * OUTLIER_FACTOR);
 }

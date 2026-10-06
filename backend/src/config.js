@@ -23,6 +23,9 @@ export const config = {
     keeperKeypairPath: process.env.KEEPER_KEYPAIR || path.join(process.env.DATA_DIR || path.join(root, 'data'), 'keeper.json'),
     // Re-scan every Manifest market this often (one getProgramAccounts call).
     marketScanMs: Number(process.env.MARKET_SCAN_MS) || 60_000,
+    // Public name and URL for link previews (keep in sync with frontend/src/brand.js).
+    brand: process.env.BRAND || 'SpotBook',
+    publicUrl: process.env.PUBLIC_URL || '', // empty: derived from the request's Host
     // Polling of markets being viewed / only awaiting a payout (each poll is 1 RPC credit total).
     viewPollMs: Number(process.env.VIEW_POLL_MS) || 3_000,
     watchPollMs: Number(process.env.WATCH_POLL_MS) || 15_000,

@@ -1,14 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import TokenIcon from './TokenIcon.jsx';
-import { useWallet } from '@solana/wallet-adapter-react';
-import { useWalletModal } from '@solana/wallet-adapter-react-ui';
-import Modal from './Modal.jsx';
-import { useToast } from './Toasts.jsx';
-import { getJSON, postJSON } from '../services/api';
+import CreateMarketModal from './CreateMarketModal.jsx';
+import { getJSON } from '../services/api';
 import { useFavorites } from '../hooks/useFavorites';
-import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
-import { formatPct, formatPrice, formatUsd, formatAmount } from '../utils/format';
+import { formatPct, formatPrice, formatUsd, formatAmount, shortAddress } from '../utils/format';
 import './MarketHeader.css';
 
 const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -55,6 +51,20 @@ function Star({ on, onClick, size = 14 }) {
   );
 }
 
+const QUOTE_FILTERS = [
+  { id: 'all', label: 'All', mint: null },
+  { id: 'SOL', label: 'SOL', mint: 'So11111111111111111111111111111111111111112' },
+  { id: 'USDC', label: 'USDC', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' },
+];
+const QUOTE_FILTER_KEY = 'spot.quoteFilter';
+const readQuoteFilter = () => {
+  try {
+    return QUOTE_FILTERS.find(f => f.id === localStorage.getItem(QUOTE_FILTER_KEY)) || QUOTE_FILTERS[0];
+  } catch {
+    return QUOTE_FILTERS[0];
+  }
+};
+
 function MarketSelector({ market }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -62,23 +72,30 @@ function MarketSelector({ market }) {
   const [favList, setFavList] = useState([]);
   const { favorites, isFavorite, toggle } = useFavorites();
   const [sort, setSort] = useState(null);
-  const [token, setToken] = useState(null); // pasted mint: { token, quotes: [{ symbol, mint, market }] }
-  const [create, setCreate] = useState(null); // { base, quote, prepared, busy }
-  const { publicKey, signAllTransactions } = useWallet();
-  const { setVisible } = useWalletModal();
-  const toast = useToast();
+  const [quoteFilter, setQuoteFilterState] = useState(readQuoteFilter);
+  const [token, setToken] = useState(null);       // pasted mint: { token, quotes: [{ symbol, mint, market }] }
+  const [found, setFound] = useState([]);         // tokens matching a typed name/symbol
+  const [create, setCreate] = useState(null);     // { base, quote } for the create-market dialog
   const navigate = useNavigate();
   const ref = useRef(null);
 
+  const setQuoteFilter = (f) => {
+    setQuoteFilterState(f);
+    try { localStorage.setItem(QUOTE_FILTER_KEY, f.id); } catch { /* storage unavailable */ }
+  };
+
   useEffect(() => {
     if (!open) return undefined;
+    const params = new URLSearchParams({ limit: '150' });
+    if (query) params.set('q', query.trim());
+    if (quoteFilter.mint) params.set('quote', quoteFilter.mint);
     const t = setTimeout(() => {
-      getJSON(`/api/markets?limit=150${query ? `&q=${encodeURIComponent(query)}` : ''}`)
+      getJSON(`/api/markets?${params}`)
         .then(r => setList(r.markets))
         .catch(() => setList([]));
     }, query ? 150 : 0);
     return () => clearTimeout(t);
-  }, [open, query]);
+  }, [open, query, quoteFilter]);
 
   // Favourites may be outside the top-150 list, so fetch them by address.
   const favKey = favorites.join(',');
@@ -89,13 +106,18 @@ function MarketSelector({ market }) {
     return () => { live = false; };
   }, [open, favKey]);
 
-  // A pasted mint can be turned into a new market if it has none yet.
+  // A pasted mint can be turned into a new market if it has none yet; a typed name or symbol
+  // also looks for verified tokens that have no market at all.
   useEffect(() => {
     setToken(null);
-    const mint = query.trim();
-    if (!open || !MINT_RE.test(mint)) return undefined;
+    setFound([]);
+    const text = query.trim();
+    if (!open || text.length < 2) return undefined;
     let live = true;
-    const t = setTimeout(() => getJSON(`/api/tokens/${mint}`).then(r => live && setToken(r)).catch(() => {}), 250);
+    const t = setTimeout(() => {
+      if (MINT_RE.test(text)) getJSON(`/api/tokens/${text}`).then(r => live && setToken(r)).catch(() => {});
+      else getJSON(`/api/tokens/search?q=${encodeURIComponent(text)}`).then(r => live && setFound(r.tokens)).catch(() => {});
+    }, 250);
     return () => { live = false; clearTimeout(t); };
   }, [open, query]);
 
@@ -112,44 +134,20 @@ function MarketSelector({ market }) {
   }, [open]);
 
   const go = (address) => { setOpen(false); setQuery(''); navigate(`/trade/${address}`); };
+  const startCreate = (base = '', quote = null) => { setOpen(false); setCreate({ base, quote }); };
 
-  async function startCreate(quote) {
-    if (!publicKey) return setVisible(true);
-    const base = token.token;
-    setOpen(false);
-    setCreate({ base, quote, prepared: null, busy: 'Preparing…' });
-    try {
-      const prepared = await postJSON('/api/markets/create', { wallet: publicKey.toBase58(), baseMint: base.mint, quoteMint: quote.mint });
-      if (prepared.step === 'exists') { setCreate(null); return go(prepared.market); }
-      setCreate({ base, quote, prepared, busy: null });
-    } catch (err) {
-      setCreate(null);
-      toast({ kind: 'error', title: 'Could not create market', message: err.message });
-    }
-  }
-
-  async function confirmCreate() {
-    const { prepared, base, quote } = create;
-    setCreate(c => ({ ...c, busy: 'Approve in your wallet…' }));
-    try {
-      const res = await signAndSubmit(prepared, signAllTransactions);
-      toast({ kind: 'success', title: `${base.symbol}/${quote.symbol} market created`, message: 'Place the first order to start the book.', link: explorerTx(res.signature) });
-      setCreate(null);
-      go(res.market);
-    } catch (err) {
-      setCreate(null);
-      if (!isUserRejection(err)) toast({ kind: 'error', title: 'Could not create market', message: err.message });
-    }
-  }
-
-  // Starred markets first (those matching the search, when searching), each group sorted.
+  // Starred markets first (those matching the search and filter), each group sorted.
   const q = query.trim().toLowerCase();
-  const favMatches = list ? favList.filter(m => isFavorite(m.address) && (!q || list.some(x => x.address === m.address) || m.symbol.toLowerCase().includes(q))) : [];
+  const favMatches = list ? favList.filter(m => isFavorite(m.address)
+    && (!quoteFilter.mint || m.quote.mint === quoteFilter.mint)
+    && (!q || list.some(x => x.address === m.address) || m.symbol.toLowerCase().includes(q))) : [];
   const sorted = list && [
     ...(sortMarkets(favMatches, sort) || []),
     ...(sortMarkets(list.filter(m => !isFavorite(m.address)), sort) || []),
   ];
-  const creatable = token?.quotes.filter(q => !q.market && !list?.some(m => m.base.mint === token.token.mint && m.quote.mint === q.mint)) || [];
+  const creatable = token?.quotes.filter(x => !x.market && !list?.some(m => m.base.mint === token.token.mint && m.quote.mint === x.mint)) || [];
+  // Verified tokens with no active market whose name matched (and aren't already listed).
+  const noMarket = found.filter(t => t.activeMarkets === 0 && !list?.some(m => m.base.mint === t.mint));
 
   return (
     <div className="selector" ref={ref}>
@@ -167,10 +165,17 @@ function MarketSelector({ market }) {
           <input
             autoFocus
             className="selector-search"
-            placeholder="Search pair or paste mint"
+            placeholder="Search pair, token or paste mint"
             value={query}
             onChange={e => setQuery(e.target.value)}
           />
+          <div className="selector-filters" role="tablist" aria-label="Quote token">
+            {QUOTE_FILTERS.map(f => (
+              <button key={f.id} type="button" role="tab" aria-selected={quoteFilter.id === f.id} className={`selector-filter ${quoteFilter.id === f.id ? 'active' : ''}`} onClick={() => setQuoteFilter(f)}>
+                {f.mint ? `${f.label} pairs` : f.label}
+              </button>
+            ))}
+          </div>
           <div className="selector-head">
             <span />
             <SortHead id="pair" label="Pair" sort={sort} setSort={setSort} />
@@ -179,7 +184,7 @@ function MarketSelector({ market }) {
           </div>
           <div className="selector-list">
             {!list && <div className="selector-empty"><span className="spinner" /></div>}
-            {list && !sorted.length && !creatable.length && <div className="selector-empty">No markets match.</div>}
+            {list && !sorted.length && !creatable.length && !noMarket.length && <div className="selector-empty">No markets match.</div>}
             {sorted?.map(m => (
               <div
                 role="button"
@@ -194,6 +199,7 @@ function MarketSelector({ market }) {
                   <TokenIcon token={m.base} size={18} />
                   <span>{m.base.symbol}<span className="muted">/{m.quote.symbol}</span></span>
                   {m.base.verified && m.quote.verified && <span className="verified" title="Both tokens verified by Jupiter">✓</span>}
+                  {m.orders === 0 && <span className="selector-tag" title="No orders on this market yet">empty</span>}
                 </span>
                 <span className="num">{formatPrice(m.last)}</span>
                 <span className="num muted">{m.volume24hUsd != null ? formatUsd(m.volume24hUsd) : '—'}</span>
@@ -203,39 +209,41 @@ function MarketSelector({ market }) {
               <div className="selector-create">
                 <div className="selector-create-title">
                   <TokenIcon token={token.token} size={18} />
-                  <span>No {token.token.symbol}/{creatable.map(q => q.symbol).join(' or ')} market yet</span>
+                  <span>No {token.token.symbol}/{creatable.map(x => x.symbol).join(', ')} market yet</span>
                 </div>
                 <div className="selector-create-actions">
-                  {creatable.map(q => (
-                    <button key={q.mint} type="button" className="btn small" onClick={() => startCreate(q)}>
-                      Create {token.token.symbol}/{q.symbol}
+                  {creatable.map(x => (
+                    <button key={x.mint} type="button" className="btn small" onClick={() => startCreate(token.token.mint, x.symbol)}>
+                      Create {token.token.symbol}/{x.symbol}
                     </button>
                   ))}
+                  <button type="button" className="btn small" onClick={() => startCreate(token.token.mint, 'other')}>
+                    {token.token.symbol}/other token…
+                  </button>
                 </div>
               </div>
+            )}
+            {noMarket.length > 0 && (
+              <div className="selector-create">
+                <div className="selector-create-title"><span>Tokens with no market yet</span></div>
+                {noMarket.map(t => (
+                  <div key={t.mint} className="selector-nomarket">
+                    <TokenIcon token={t} size={18} />
+                    <span className="selector-nomarket-name"><strong>{t.symbol}</strong> <span className="muted">{t.name}</span></span>
+                    <button type="button" className="btn small" onClick={() => startCreate(t.mint)}>Create market</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {list && (
+              <button type="button" className="selector-create-any" onClick={() => startCreate()}>
+                ＋ Create market
+              </button>
             )}
           </div>
         </div>
       )}
-      {create && (
-        <Modal
-          title={`Create ${create.base.symbol}/${create.quote.symbol} market`}
-          onClose={() => !create.busy?.startsWith('Approve') && setCreate(null)}
-          actions={(
-            <>
-              <button type="button" className="btn" disabled={!!create.busy} onClick={() => setCreate(null)}>Cancel</button>
-              <button type="button" className="btn primary" disabled={!!create.busy} onClick={confirmCreate}>{create.busy || 'Create market'}</button>
-            </>
-          )}
-        >
-          {create.prepared ? (
-            <p>
-              Opens a new zero-fee order book on Manifest that anyone can trade. One-time cost of{' '}
-              <strong>{create.prepared.summary.costSol.toFixed(4)} SOL</strong> (network rent, not refundable).
-            </p>
-          ) : <p><span className="spinner" /> Preparing…</p>}
-        </Modal>
-      )}
+      {create && <CreateMarketModal initialBase={create.base} initialQuote={create.quote} onClose={() => setCreate(null)} />}
     </div>
   );
 }
@@ -270,8 +278,32 @@ export default function MarketHeader({ market }) {
             title={market.volumeWindowHours != null && market.volumeWindowHours < 24 ? `Measured over the last ${market.volumeWindowHours}h so far` : undefined}
           />
           <Stat label="Venue" value="Manifest" title="Zero-fee on-chain order book; Jupiter routes swaps through it" />
+          <TokenAddress token={market.base} market={market.address} />
         </div>
       )}
+    </div>
+  );
+}
+
+/** The base token's mint, copyable, with a Solscan link (and the market account in the tooltip). */
+function TokenAddress({ token, market }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(token.mint);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard blocked (insecure context or permissions): the link still works.
+    }
+  };
+  return (
+    <div className="stat token-address" title={`${token.symbol} token: ${token.mint}\nManifest market: ${market}`}>
+      <span className="stat-label">{token.symbol} address</span>
+      <span className="stat-value num">
+        <a href={`https://solscan.io/token/${token.mint}`} target="_blank" rel="noreferrer">{shortAddress(token.mint)}</a>
+        <button type="button" className="copy-btn" onClick={copy} aria-label={`Copy ${token.symbol} token address`}>{copied ? '✓' : '⧉'}</button>
+      </span>
     </div>
   );
 }

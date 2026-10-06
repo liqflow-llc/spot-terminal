@@ -7,11 +7,15 @@
 //   resting order's price, and there is no "reduce order" instruction).
 // What is ambiguous: an order that disappeared was either filled or cancelled. The volume counter
 // settles it: whatever volume the partial fills don't explain is assigned to vanished orders
-// nearest the top of the book (fills consume the best prices first), as long as they fit.
+// nearest the top of the book (fills consume the best prices first), as long as they fit. A taker
+// can't skip a better-priced order that is still resting untouched, so vanished orders behind
+// one are cancels, never fills (this is what keeps a cancelled dust bid far below the market
+// from being recorded as a trade).
 // Orders placed and filled entirely between two snapshots are invisible; their volume still
 // counts in the 24h figure, which comes from the counter.
 
 const VOLUME_TOLERANCE = 1.02; // rounding in Manifest's quote accounting
+const MAX_DISTANCE_FROM_MID = 0.5; // fills further than this from the previous mid are not believed
 
 /** @returns {{ price: number, size: number, quote: number, side: 'buy'|'sell' }[]} taker side */
 export function inferFills(prev, next) {
@@ -28,6 +32,15 @@ export function inferFills(prev, next) {
     const fills = [];
     let explained = 0;
     const vanished = [];
+    // The best untouched order on each side: nothing behind it can have been filled.
+    let barrierBid = -Infinity, barrierAsk = Infinity;
+    for (const [seq, { o, isBid }] of before) {
+        const now = after.get(seq);
+        if (now && now.numBaseTokens >= o.numBaseTokens) {
+            if (isBid) barrierBid = Math.max(barrierBid, o.tokenPrice);
+            else barrierAsk = Math.min(barrierAsk, o.tokenPrice);
+        }
+    }
     for (const [seq, { o, isBid }] of before) {
         const now = after.get(seq);
         if (now) {
@@ -36,7 +49,7 @@ export function inferFills(prev, next) {
                 fills.push(fill(o.tokenPrice, filled, isBid));
                 explained += o.tokenPrice * filled * quoteScale;
             }
-        } else {
+        } else if (isBid ? o.tokenPrice >= barrierBid : o.tokenPrice <= barrierAsk) {
             vanished.push({ o, isBid });
         }
     }
@@ -59,7 +72,10 @@ export function inferFills(prev, next) {
             if (used >= residual) break;
         }
     }
-    return fills;
+    // Last line of defence against a mis-attributed cancel: trades far from the market are noise.
+    const bestBid = prev.bestBidPrice(), bestAsk = prev.bestAskPrice();
+    const mid = bestBid && bestAsk ? (bestBid + bestAsk) / 2 : null;
+    return mid ? fills.filter(f => Math.abs(f.price / mid - 1) <= MAX_DISTANCE_FROM_MID) : fills;
 }
 
 function fill(price, size, makerIsBid) {

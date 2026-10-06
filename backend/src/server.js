@@ -191,8 +191,17 @@ app.get('/api/markets', (req, res) => {
         res.set('Cache-Control', 'no-cache');
         return res.json({ markets: wanted.map(a => markets.summary(a)).filter(Boolean).map(marketView) });
     }
-    let list = markets.allSummaries().filter(s => s.bidCount + s.askCount > 0 || exactHit(s)).map(marketView);
+    // A verified token searched by its exact symbol also shows its markets that have no orders yet,
+    // so "SKIRM" finds a freshly created SKIRM market.
+    const namedEmpty = (s) => {
+        if (!q) return false;
+        const t = registry.get(s.baseMint);
+        return !!t?.verified && (t.symbol || '').toLowerCase() === q;
+    };
+    let list = markets.allSummaries().filter(s => s.bidCount + s.askCount > 0 || exactHit(s) || namedEmpty(s)).map(marketView);
     if (q) list = list.filter(m => m.symbol.toLowerCase().includes(q) || m.base.mint === req.query.q || m.address === req.query.q);
+    // ?quote=<mint>: only pairs quoted in that token (the SOL / USDC filter).
+    if (req.query.quote) list = list.filter(m => m.quote.mint === req.query.quote);
     // Exact token matches first (so "JUP" finds JUP before JupSOL), then verified pairs with
     // real 24h activity.
     const exact = (m) => Number(!!q && (m.base.symbol.toLowerCase() === q || m.base.mint === req.query.q));
@@ -201,7 +210,7 @@ app.get('/api/markets', (req, res) => {
         (Number(b.base.verified && b.quote.verified) - Number(a.base.verified && a.quote.verified)) ||
         ((b.volume24hUsd ?? 0) - (a.volume24hUsd ?? 0)) || (b.orders - a.orders));
     res.set('Cache-Control', 'public, max-age=5');
-    res.json({ markets: list.slice(0, limit) });
+    res.json({ markets: list.slice(0, limit), total: list.length });
 });
 
 app.get('/api/markets/:address', (req, res) => {
@@ -376,7 +385,40 @@ app.post('/api/tx/submit', writeLimit, handle(body => orders.submit(body)));
 const NEW_MARKET_QUOTES = [
     { symbol: 'SOL', mint: 'So11111111111111111111111111111111111111112' },
     { symbol: 'USDC', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' },
+    { symbol: 'USDT', mint: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB' },
 ];
+
+/**
+ * Verified tokens (Jupiter's list) matching a symbol or name, with how many active Manifest
+ * markets each has, so the market picker can offer "create a market" for ones with none.
+ */
+app.get('/api/tokens/search', rateLimit('token-search', 60, 60_000), (req, res) => {
+    const q = String(req.query.q || '').trim().toLowerCase();
+    if (q.length < 2) return res.json({ tokens: [] });
+    const active = new Map(); // mint -> active market count
+    for (const s of markets.allSummaries()) {
+        if (s.bidCount + s.askCount === 0) continue;
+        for (const m of [s.baseMint, s.quoteMint]) active.set(m, (active.get(m) || 0) + 1);
+    }
+    const rank = (t) => {
+        const sym = (t.symbol || '').toLowerCase(), name = (t.name || '').toLowerCase();
+        if (sym === q) return 0;
+        if (sym.startsWith(q)) return 1;
+        if (name.includes(q)) return 2;
+        return null;
+    };
+    const hits = [];
+    for (const t of registry.tokens.values()) {
+        if (!t.verified) continue;
+        const r = rank(t);
+        if (r !== null) hits.push({ t, r });
+    }
+    hits.sort((a, b) => (a.r - b.r) || ((b.t.liquidity ?? 0) - (a.t.liquidity ?? 0)));
+    res.set('Cache-Control', 'public, max-age=30');
+    res.json({
+        tokens: hits.slice(0, 8).map(({ t }) => ({ ...registry.display(t.mint), activeMarkets: active.get(t.mint) || 0 })),
+    });
+});
 app.get('/api/tokens/:mint', rateLimit('tokens', 30, 60_000), async (req, res) => {
     const mint = req.params.mint;
     try {
@@ -410,10 +452,67 @@ app.get('/api/payout-accounts', rateLimit('account', 40, 60_000), async (req, re
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 // Production: serve the built frontend (vite dev server proxies /api instead during development).
+const DEFAULT_DESCRIPTION = 'Trade Solana tokens on on-chain order books with zero trading fees. Limit orders pay out to your wallet automatically; market orders get the best price across Solana.';
+const PAGE_TITLES = { '/account': 'Account', '/terms': 'Terms of Service', '/privacy': 'Privacy Policy' };
+const escapeHtml = (v) => String(v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function pageMeta(req) {
+    const brand = config.brand;
+    const m = req.path.match(/^\/trade\/([1-9A-HJ-NP-Za-km-z]{32,44})$/);
+    const s = m && markets.summary(m[1]);
+    if (s) {
+        const v = marketView(s);
+        const price = v.last ? `${formatNumber(v.last)} ${v.quote.symbol}` : null;
+        const change = v.change24h != null ? `${v.change24h >= 0 ? '+' : ''}${(v.change24h * 100).toFixed(2)}% 24h` : null;
+        return {
+            title: `${v.symbol}${price ? ` ${price}` : ''} · ${brand}`,
+            description: `Trade ${v.base.name || v.base.symbol} (${v.symbol}) on Solana order books${price ? `: ${[price, change].filter(Boolean).join(', ')}` : ''}. Zero trading fees; limit orders pay out to your wallet automatically.`,
+        };
+    }
+    const page = PAGE_TITLES[req.path];
+    return { title: page ? `${page} · ${brand}` : `${brand} · Solana order books`, description: DEFAULT_DESCRIPTION };
+}
+
+function formatNumber(n) {
+    return n >= 1 ? n.toLocaleString('en-US', { maximumFractionDigits: n >= 100 ? 2 : 4 }) : n.toPrecision(4);
+}
+
+function renderIndex(html, req) {
+    const { title, description } = pageMeta(req);
+    const origin = config.publicUrl || `https://${req.get('host')}`;
+    const url = `${origin}${req.path === '/' ? '' : req.path}`;
+    const image = `${origin}/og.png`;
+    const tags = [
+        `<meta name="description" content="${escapeHtml(description)}" />`,
+        `<link rel="canonical" href="${escapeHtml(url)}" />`,
+        `<meta property="og:type" content="website" />`,
+        `<meta property="og:site_name" content="${escapeHtml(config.brand)}" />`,
+        `<meta property="og:title" content="${escapeHtml(title)}" />`,
+        `<meta property="og:description" content="${escapeHtml(description)}" />`,
+        `<meta property="og:url" content="${escapeHtml(url)}" />`,
+        `<meta property="og:image" content="${escapeHtml(image)}" />`,
+        `<meta property="og:image:width" content="1200" />`,
+        `<meta property="og:image:height" content="630" />`,
+        `<meta name="twitter:card" content="summary_large_image" />`,
+        `<meta name="twitter:title" content="${escapeHtml(title)}" />`,
+        `<meta name="twitter:description" content="${escapeHtml(description)}" />`,
+        `<meta name="twitter:image" content="${escapeHtml(image)}" />`,
+    ].join('\n    ');
+    return html
+        .replace(/<title>[^<]*<\/title>/, `<title>${escapeHtml(title)}</title>`)
+        .replace(/<meta name="description"[^>]*>/, tags);
+}
+
 const dist = path.join(config.root, 'frontend', 'dist');
 if (fs.existsSync(dist)) {
+    const indexHtml = fs.readFileSync(path.join(dist, 'index.html'), 'utf8');
     app.use(express.static(dist, { maxAge: '1h', index: false }));
-    app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(path.join(dist, 'index.html')));
+    // Link previews (X, Telegram, Discord...) don't run JavaScript, so each page's title,
+    // description and preview tags are filled in here; market links show the pair and price.
+    app.get(/^\/(?!api\/).*/, (req, res) => {
+        res.set('Cache-Control', 'no-cache');
+        res.type('html').send(renderIndex(indexHtml, req));
+    });
 }
 
 app.listen(config.port, config.host, () => {

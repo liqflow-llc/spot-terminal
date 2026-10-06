@@ -46,6 +46,7 @@ const { ixs, signers } = await Market.setupIxs(connection, BASE, QUOTE, taker.pu
 await sendAndConfirmTransaction(connection, new Transaction().add(...ixs), [taker, ...signers]);
 const market = signers[0].publicKey.toBase58();
 const NEW_TOKEN = await spl.createMint(connection, taker, taker.publicKey, null, 9); // has no market yet
+const NEW_TOKEN2 = await spl.createMint(connection, taker, taker.publicKey, null, 6); // for an arbitrary-quote market
 await spl.mintTo(connection, taker, NEW_TOKEN, (await spl.getOrCreateAssociatedTokenAccount(connection, taker, NEW_TOKEN, user.publicKey)).address, taker, 1_000n * 10n ** 9n);
 console.log('  market', market, 'user', user.publicKey.toBase58());
 
@@ -289,6 +290,29 @@ try {
     const priceBox = await page.evaluate(() => [...document.querySelectorAll('.of-field')].find(f => f.textContent.includes('Price')).querySelector('input').value);
     if (priceBox !== '') throw new Error(`price box kept the previous market's price (${priceBox})`);
     await shot('6-new-market');
+
+    step('Creating a market against any quote token, from the button at the end of the list');
+    await page.click('.selector-btn');
+    await page.waitForSelector('.selector-create-any', { timeout: 20000 });
+    await page.click('.selector-create-any');
+    await page.waitForSelector('#cm-base');
+    await page.type('#cm-base', NEW_TOKEN2.toBase58());
+    await clickText('.cm-chip', 'Other token');
+    await page.type('.cm-form input:not(#cm-base)', QUOTE.toBase58());
+    await page.waitForFunction(() => document.querySelectorAll('.cm-token').length === 2, { timeout: 20000 });
+    await clickText('.modal button', 'Continue');
+    await page.waitForFunction(() => document.querySelector('.modal')?.textContent.includes('network rent'), { timeout: 30000 });
+    await clickText('.modal button', 'Create market');
+    await page.waitForFunction((m) => !location.pathname.endsWith(m), { timeout: 60000 }, created); // toasts may have expired
+    const created2 = page.url().split('/trade/')[1];
+    const info2 = await (await fetch(`${base}/api/markets/${created2}`)).json();
+    if (info2.base?.mint !== NEW_TOKEN2.toBase58() || info2.quote?.mint !== QUOTE.toBase58()) throw new Error(`unexpected market ${JSON.stringify(info2).slice(0, 200)}`);
+    console.log(`  created ${info2.symbol} (arbitrary quote)`);
+    await shot('6b-arbitrary-quote');
+
+    step('Quote filter returns only that quote token\'s pairs');
+    const solOnly = await (await fetch(`${base}/api/markets?quote=So11111111111111111111111111111111111111112&q=${NEW_TOKEN.toBase58()}`)).json();
+    if (!solOnly.markets.length || solOnly.markets.some(m => m.quote.symbol !== 'SOL')) throw new Error(`SOL filter wrong: ${JSON.stringify(solOnly).slice(0, 200)}`);
 
     step('Terms and Privacy pages render');
     for (const [path, heading] of [['/terms', 'Terms of Service'], ['/privacy', 'Privacy Policy']]) {

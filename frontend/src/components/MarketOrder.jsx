@@ -10,7 +10,8 @@ import { formatAmount, formatPrice, toInputString } from '../utils/format';
 const SOL = 'So11111111111111111111111111111111111111112';
 const SOL_RESERVE = 0.02;
 const PERCENTS = [25, 50, 75, 100];
-const SLIPPAGES = [10, 50, 100, 200]; // bps
+const SLIPPAGES = [50, 100]; // bps presets; anything else is typed in
+const MAX_SLIPPAGE_PCT = 10; // matches MAX_SLIPPAGE_BPS on the backend
 const WARN_DEVIATION = 0.05; // matches PRICE_WARN_DEVIATION on the backend
 const QUOTE_DEBOUNCE_MS = 500;
 const QUOTE_REFRESH_MS = 10_000;
@@ -28,6 +29,7 @@ export default function MarketOrder({ market, side, account, onPlaced }) {
   const toast = useToast();
   const [amount, setAmount] = useState('');
   const [slippageBps, setSlippageBps] = useState(50);
+  const [customSlippage, setCustomSlippage] = useState('');
   const [quote, setQuote] = useState(null); // { key, summary } | { key, error }
   const [busy, setBusy] = useState(null);
   const [riskPrompt, setRiskPrompt] = useState(null);
@@ -66,6 +68,7 @@ export default function MarketOrder({ market, side, account, onPlaced }) {
   const worst = q ? Math.max(q.deviation ?? -1, q.priceImpact) : null;
   const risky = worst != null && worst > WARN_DEVIATION;
   const insufficient = available != null && a > available + 1e-12;
+  const badSlippage = customSlippage !== '' && !(Number(customSlippage) > 0 && Number(customSlippage) <= MAX_SLIPPAGE_PCT);
 
   const setPercent = (pct) => available && setAmount(toInputString((available * pct) / 100, inToken.decimals));
 
@@ -118,7 +121,7 @@ export default function MarketOrder({ market, side, account, onPlaced }) {
       </div>
 
       <label className="of-field">
-        <span className="of-field-label">{isBuy ? 'Spend' : 'Amount'}</span>
+        <span className="of-field-label">Amount</span>
         <input inputMode="decimal" value={amount} placeholder="0" onChange={e => setAmount(e.target.value.replace(/[^0-9.]/g, ''))} />
         <span className="of-field-unit">{inToken.symbol}</span>
       </label>
@@ -132,11 +135,28 @@ export default function MarketOrder({ market, side, account, onPlaced }) {
         <span className="muted" title="The most the price may move against you before the trade is cancelled">Max slippage</span>
         <div className="of-slippage-options">
           {SLIPPAGES.map(bps => (
-            <button key={bps} type="button" className={`of-pct ${slippageBps === bps ? 'active' : ''}`} onClick={() => setSlippageBps(bps)}>{bps / 100}%</button>
+            <button key={bps} type="button" className={`of-pct ${slippageBps === bps && !customSlippage ? 'active' : ''}`} onClick={() => { setCustomSlippage(''); setSlippageBps(bps); }}>{bps / 100}%</button>
           ))}
+          <label className={`of-slippage-custom ${customSlippage ? 'active' : ''}`} title={`Custom, up to ${MAX_SLIPPAGE_PCT}%`}>
+            <input
+              inputMode="decimal"
+              placeholder="Custom"
+              value={customSlippage}
+              aria-label="Custom slippage percent"
+              onChange={(e) => {
+                const v = e.target.value.replace(/[^0-9.]/g, '');
+                setCustomSlippage(v);
+                const pct = Number(v);
+                if (pct > 0 && pct <= MAX_SLIPPAGE_PCT) setSlippageBps(Math.max(1, Math.round(pct * 100)));
+                else if (!v) setSlippageBps(50);
+              }}
+            />
+            <span>%</span>
+          </label>
         </div>
       </div>
 
+      {badSlippage && <div className="of-note warn">Slippage must be more than 0% and at most {MAX_SLIPPAGE_PCT}%.</div>}
       {quoteError && <div className="of-note warn">{quoteError}</div>}
       {risky && (
         <div className="of-note danger" role="alert">
@@ -149,7 +169,7 @@ export default function MarketOrder({ market, side, account, onPlaced }) {
         type="button"
         className={`of-submit ${side}`}
         onClick={submit}
-        disabled={!!busy || (publicKey && (insufficient || !(a > 0) || !q))}
+        disabled={!!busy || badSlippage || (publicKey && (insufficient || !(a > 0) || !q))}
       >
         {busy || (!publicKey ? 'Connect wallet' : insufficient ? 'Insufficient balance' : `${isBuy ? 'Buy' : 'Sell'} ${base.symbol} now`)}
       </button>

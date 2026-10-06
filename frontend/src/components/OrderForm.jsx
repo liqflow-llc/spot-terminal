@@ -52,14 +52,17 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
 
   // Default to the best price on your own side of the book (a resting order), once per market
   // and side, until the user sets a price themselves.
+  // Waits for the book: before it arrives the only other hint is the last trade, which on a thin
+  // market can be far off. Jupiter's market price is the fallback for an empty side.
   useEffect(() => {
-    if (!market || priceTouched.current) return;
+    if (!market || !book || priceTouched.current) return;
     const key = `${market.address}|${side}`;
     if (seededFor.current === key) return;
-    const ref = (side === 'buy' ? book?.bestBid : book?.bestAsk) ?? market.last;
+    const ref = (side === 'buy' ? book.bestBid : book.bestAsk) ?? referenceFor(market.address) ?? market.last;
     if (!ref) return;
     seededFor.current = key;
     setPrice(toInputString(ref, pDecimals + 2));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [market, book, side, pDecimals]);
 
   const editPrice = (v) => {
@@ -69,6 +72,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
 
   useEffect(() => {
     if (!pickedPrice) return;
+    setOrderType('limit'); // a picked price only means something for a limit order
     priceTouched.current = true;
     setPrice(toInputString(pickedPrice.price, pDecimals + 2));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -88,6 +92,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
     return () => { live = false; clearInterval(t); };
   }, [market?.address]);
 
+  const referenceFor = (address) => (reference && reference.address === address ? reference.price : null);
   const p = Number(price), a = Number(amount);
   const refPrice = reference && reference.address === market?.address ? reference.price : undefined;
   const off = adverseDeviation(side, p, refPrice);
