@@ -1,9 +1,20 @@
 // A raw JSON-RPC call, for provider methods web3.js doesn't wrap (e.g. Helius getProgramAccountsV2).
 import { config } from './config.js';
+import { countRpc, rpcFailed } from './rpcStats.js';
 
 export const isHelius = /helius/i.test(config.rpcUrl);
 
 export async function rpc(method, params) {
+    countRpc(method);
+    try {
+        return await rawRpc(method, params);
+    } catch (err) {
+        rpcFailed(method, err);
+        throw err;
+    }
+}
+
+async function rawRpc(method, params) {
     const res = await fetch(config.rpcUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

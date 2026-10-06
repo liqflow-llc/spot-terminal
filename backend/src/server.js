@@ -14,6 +14,9 @@ import { OrderService, UserError } from './orders/orderService.js';
 import { Keeper, loadKeeperKeypair } from './orders/keeper.js';
 import { aggregateBook } from './marketdata/aggregate.js';
 import { GeckoStats } from './marketdata/geckoStats.js';
+import { errorDetail, log, short, takeProblemCounts } from './log.js';
+import { takeRpcStats } from './rpcStats.js';
+import { startLogRotation } from './logRotate.js';
 
 const registry = new TokenRegistry({ heliusRpc: config.rpcUrl, jupApiKey: config.jupApiKey });
 registry.startBackgroundRefresh();
@@ -55,8 +58,9 @@ markets.on('fills', (address, fills) => {
 await markets.startScanning();
 // Token metadata for everything listed on Manifest (cached on disk after the first run).
 registry.ensure([...new Set(markets.allSummaries().flatMap(s => [s.baseMint, s.quoteMint]))])
-    .catch(err => console.error('Token metadata resolve failed:', err.message));
+    .catch(err => log.warn('tokens', 'resolve_failed', { msg: err.message }));
 keeper.start();
+startLogRotation(path.join(config.root, 'logs'));
 archer.start();
 const gecko = new GeckoStats(markets);
 gecko.start();
@@ -366,7 +370,8 @@ const handle = (fn) => async (req, res) => {
     try {
         res.json(await fn(req.body || {}));
     } catch (err) {
-        if (!(err instanceof UserError)) console.error(`${req.path} failed:`, err);
+        if (err instanceof UserError) log.info('api', 'refused', { path: req.path, wallet: short(req.body?.wallet), code: err.code, msg: err.message });
+        else log.error('api', 'failed', { path: req.path, wallet: short(req.body?.wallet), msg: errorDetail(err), stack: err.stack?.split('\n')[1]?.trim() });
         res.status(err.status || 500).json(err instanceof UserError ? { error: err.message, code: err.code } : { error: 'Something went wrong, please try again.' });
     }
 };
@@ -448,9 +453,54 @@ app.get('/api/payout-accounts', rateLimit('account', 40, 60_000), async (req, re
     }
 });
 
-app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 // Production: serve the built frontend (vite dev server proxies /api instead during development).
+// ---------- health line (every 15 minutes) ----------
+// One line to read when checking on the site: data freshness, load, RPC credit use, the payout
+// wallet's SOL, and how many warnings/errors each area logged since the last line.
+const HEALTH_MS = 15 * 60 * 1000;
+const logHealth = async () => {
+    try {
+        let viewers = 0, watchers = 0;
+        for (const sub of markets.subscriptions.values()) { viewers += sub.viewers; watchers += sub.watchers; }
+        const lamports = await connection.getBalance(keeperKeypair.publicKey).catch(() => null);
+        const rpc = takeRpcStats();
+        log.info('health', 'status', {
+            markets: markets.markets.size,
+            active: markets.allSummaries().filter(s => s.bidCount + s.askCount > 0).length,
+            scanAgeS: Math.round((Date.now() - markets.lastScan) / 1000),
+            streams: [...streamsPerIp.values()].reduce((a, b) => a + b, 0),
+            viewedMarkets: viewers, payoutWatched: watchers,
+            archer: archer.connected ? `up(${archer.subs.size})` : 'down',
+            openOrders: orderStore.active().length,
+            keeperSol: lamports == null ? '?' : (lamports / 1e9).toFixed(4),
+            rpcCalls: rpc.calls, credits15m: rpc.credits, creditsPerDay: Math.round(rpc.credits * 96), topRpc: rpc.top,
+            rssMb: Math.round(process.memoryUsage().rss / 1e6),
+            problems: takeProblemCounts(),
+        });
+        if (lamports != null && lamports < 0.05e9) log.error('keeper', 'LOW_BALANCE', { sol: (lamports / 1e9).toFixed(4), feePayer: keeperKeypair.publicKey.toBase58() });
+    } catch (err) {
+        log.warn('health', 'failed', { msg: err.message });
+    }
+};
+setTimeout(logHealth, 60_000).unref(); // one soon after a restart, then every 15 minutes
+setInterval(logHealth, HEALTH_MS).unref();
+
+// ---------- errors from people's browsers ----------
+// The order form reports failures that never reach the server (wallet errors, crashes), so
+// they show up in these logs too.
+app.post('/api/client-log', rateLimit('client-log', 20, 60_000), (req, res) => {
+    const b = req.body || {};
+    const clip = (v, n) => (v == null ? undefined : String(v).slice(0, n));
+    log.warn('client', clip(b.kind, 40) || 'error', {
+        msg: clip(b.message, 300), wallet: short(clip(b.wallet, 44)), market: short(clip(b.market, 44)),
+        where: clip(b.where, 80), ua: clip(req.headers['user-agent'], 80),
+    });
+    res.status(204).end();
+});
+
+app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
+
 const DEFAULT_DESCRIPTION = 'Trade Solana tokens on on-chain order books with zero trading fees. Limit orders pay out to your wallet automatically; market orders get the best price across Solana.';
 const PAGE_TITLES = { '/account': 'Account', '/terms': 'Terms of Service', '/privacy': 'Privacy Policy' };
 const escapeHtml = (v) => String(v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -515,5 +565,5 @@ if (fs.existsSync(dist)) {
 }
 
 app.listen(config.port, config.host, () => {
-    console.log(`API listening on http://${config.host}:${config.port}`);
+    log.info('server', 'listening', { url: `http://${config.host}:${config.port}`, rpc: config.rpcUrl.replace(/api-key=[^&]+/, 'api-key=…') });
 });

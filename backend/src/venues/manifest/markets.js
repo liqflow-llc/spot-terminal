@@ -19,6 +19,7 @@ import { connection } from '../../solana.js';
 import { config } from '../../config.js';
 import { inferFills } from './inferFills.js';
 import { isHelius, rpc } from '../../rpcRaw.js';
+import { log } from '../../log.js';
 
 export const MANIFEST_PROGRAM_ID = new PublicKey('MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms');
 
@@ -75,7 +76,8 @@ export class ManifestMarkets extends EventEmitter {
         this.scanSlot = slot;
         this.lastScan = Date.now();
         this.maybeSnapshotVolumes();
-        console.log(`Manifest: ${full ? 'full' : 'incremental'} scan, ${accounts.length} accounts, ${parsed} markets updated in ${Date.now() - started}ms`);
+        if (full || parsed > 0) this.lastScanSummary = { full, accounts: accounts.length, updated: parsed, ms: Date.now() - started };
+        if (full) log.info('manifest', 'full_scan', { accounts: accounts.length, markets: this.markets.size, ms: Date.now() - started });
         this.emit('scan');
     }
 
@@ -87,7 +89,7 @@ export class ManifestMarkets extends EventEmitter {
             } catch (err) {
                 if (/429|max usage/i.test(err.message)) throw err;
                 // Unexpected response: use the classic call (10 credits instead of ~2) from now on.
-                console.error('Manifest: getProgramAccountsV2 failed, falling back to getProgramAccounts:', err.message);
+                log.error('manifest', 'v2_scan_failed_fallback', { msg: err.message });
                 this.useV2 = false;
             }
         }
@@ -121,7 +123,7 @@ export class ManifestMarkets extends EventEmitter {
     }
 
     startScanning() {
-        const run = () => this.scan().catch(err => console.error('Manifest scan failed:', err.message));
+        const run = () => this.scan().catch(err => log.error('manifest', 'scan_failed', { msg: err.message }));
         const first = run();
         setInterval(run, config.marketScanMs).unref();
         return first;
@@ -206,7 +208,7 @@ export class ManifestMarkets extends EventEmitter {
                 });
             }
         } catch (err) {
-            console.error('Manifest: poll failed:', err.message);
+            log.warn('manifest', 'poll_failed', { msg: err.message });
         } finally {
             this.polling = false;
         }
@@ -280,7 +282,7 @@ export class ManifestMarkets extends EventEmitter {
                 fs.mkdirSync(config.dataDir, { recursive: true });
                 fs.writeFileSync(SNAPSHOT_FILE, JSON.stringify(this.snapshots));
             } catch (err) {
-                console.error('Manifest: failed to save volume snapshots:', err.message);
+                log.warn('manifest', 'snapshot_save_failed', { msg: err.message });
             }
         }
         // Oldest snapshot within the last 24h (or the oldest we have, if younger than 24h).

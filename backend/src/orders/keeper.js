@@ -7,6 +7,7 @@ import { Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import { connection } from '../solana.js';
 import { config } from '../config.js';
 import { claimReservations } from './orderStore.js';
+import { errorDetail, log, short } from '../log.js';
 
 const SWEEP_MS = 20_000;
 const MAX_CLAIM_ATTEMPTS = 5;
@@ -16,7 +17,7 @@ export function loadKeeperKeypair() {
         const kp = Keypair.generate();
         fs.mkdirSync(config.dataDir, { recursive: true });
         fs.writeFileSync(config.keeperKeypairPath, JSON.stringify([...kp.secretKey]), { mode: 0o600 });
-        console.warn(`Keeper: generated new fee-payer keypair ${kp.publicKey.toBase58()} — fund it with a little SOL`);
+        log.warn('keeper', 'generated_keypair', { feePayer: kp.publicKey.toBase58(), note: 'fund it with a little SOL' });
         return kp;
     }
     return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(config.keeperKeypairPath, 'utf8'))));
@@ -36,7 +37,8 @@ export class Keeper {
         setInterval(() => this.sweep(), SWEEP_MS).unref();
         this.sweep();
         connection.getBalance(this.keypair.publicKey).then(lamports => {
-            console.log(`Keeper: fee payer ${this.keypair.publicKey.toBase58()} has ${(lamports / 1e9).toFixed(4)} SOL`);
+            this.balanceSol = lamports / 1e9;
+            log.info('keeper', 'started', { feePayer: this.keypair.publicKey.toBase58(), sol: this.balanceSol.toFixed(4) });
         }).catch(() => {});
     }
 
@@ -93,6 +95,7 @@ export class Keeper {
                 this.store.update(order.id, { missingSince: Date.now() });
             } else if (Date.now() - order.missingSince > 5 * 60 * 1000) {
                 this.store.update(order.id, { status: 'closed', note: 'Left the book without filling completely; withdraw any balance from the market.' });
+                log.warn('keeper', 'order_closed_unfilled', { order: order.id, wallet: short(order.wallet), market: short(order.market) });
             }
         }
     }
@@ -114,10 +117,10 @@ export class Keeper {
             if (res.value.err) throw new Error(JSON.stringify(res.value.err));
             // Landed, so the nonce was unused: no cancel can have gone through first.
             this.store.update(order.id, { status: 'claimed', claimSignature: signature, claimedAt: Date.now() });
-            console.log(`Keeper: claimed order ${order.id} -> ${signature}`);
+            log.info('keeper', 'claimed', { order: order.id, wallet: short(order.wallet), market: short(order.market), sig: signature });
         } catch (err) {
             const attempts = (order.claimAttempts || 0) + 1;
-            console.error(`Keeper: claim for ${order.id} failed (attempt ${attempts}):`, err.message);
+            log.error('keeper', 'claim_failed', { order: order.id, wallet: short(order.wallet), attempt: attempts, msg: errorDetail(err) });
             // The user cancelled meanwhile (which voids the claim): keep that outcome.
             if (this.store.get(order.id)?.status !== 'claiming') return;
             this.store.update(order.id, {

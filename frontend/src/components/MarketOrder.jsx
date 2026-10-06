@@ -6,6 +6,7 @@ import { useToast } from './Toasts.jsx';
 import { postJSON } from '../services/api';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
 import { formatAmount, formatPrice, toInputString } from '../utils/format';
+import { reportError } from '../services/report';
 
 const SOL = 'So11111111111111111111111111111111111111112';
 const SOL_RESERVE = 0.02;
@@ -107,7 +108,10 @@ export default function MarketOrder({ market, side, account, onPlaced }) {
       onPlaced?.();
     } catch (err) {
       if (isUserRejection(err)) toast({ title: 'Cancelled in wallet' });
-      else toast({ kind: 'error', title: 'Trade failed', message: err.message });
+      else {
+        toast({ kind: 'error', title: 'Trade failed', message: err.message });
+        reportError('market_order_failed', err, { wallet: publicKey?.toBase58(), market: market.address });
+      }
     } finally {
       setBusy(null);
     }

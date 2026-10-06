@@ -5,6 +5,7 @@ import path from 'path';
 import { EventEmitter } from 'events';
 import { config } from '../config.js';
 import { geckoFetch } from './gecko.js';
+import { log, short } from '../log.js';
 
 const MAX_TRADES = 300;
 const KEEP_MINUTES = 3 * 24 * 60;
@@ -108,7 +109,7 @@ export class TradeStore extends EventEmitter {
             // the chart hostage: answer with our own bars if it's slow. The fetch carries on and is
             // cached, so the next load of this chart gets the history.
             const fetching = this.geckoBars(market, resolution, Math.min(to, ownStart));
-            fetching.catch(err => console.error(`GeckoTerminal OHLCV failed for ${market}:`, err.message));
+            fetching.catch(err => log.warn('gecko', 'ohlcv_failed', { market: short(market), msg: err.message }));
             const bars = await Promise.race([fetching.catch(() => []), new Promise(r => setTimeout(r, GECKO_WAIT_MS, null))]);
             if (bars) history = bars.filter(b => b.time / 1000 >= from && b.time / 1000 < Math.min(to, ownStart));
         }
@@ -165,8 +166,8 @@ export class TradeStore extends EventEmitter {
                 dropped += rows.length - clean.length;
                 this.candles.set(market, new Map(clean));
             }
-            if (dropped) console.log(`TradeStore: dropped ${dropped} outlier candles`);
-            console.log(`TradeStore: loaded 1m candles for ${this.candles.size} markets`);
+            if (dropped) log.warn('trades', 'dropped_outlier_candles', { candles: dropped });
+            log.info('trades', 'candles_loaded', { markets: this.candles.size });
         } catch {
             // First run.
         }
@@ -185,7 +186,7 @@ export class TradeStore extends EventEmitter {
             fs.writeFileSync(`${FILE}.tmp`, JSON.stringify(out));
             fs.renameSync(`${FILE}.tmp`, FILE);
         } catch (err) {
-            console.error('TradeStore: save failed:', err.message);
+            log.warn('trades', 'save_failed', { msg: err.message });
         }
     }
 }

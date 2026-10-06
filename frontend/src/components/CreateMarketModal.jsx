@@ -9,6 +9,7 @@ import { getJSON, postJSON } from '../services/api';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
 import { shortAddress } from '../utils/format';
 import './CreateMarketModal.css';
+import { reportError } from '../services/report';
 
 const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const OTHER = 'other';
@@ -77,7 +78,10 @@ export default function CreateMarketModal({ initialBase = '', initialQuote = nul
       toast({ kind: 'success', title: `${base.data.token.symbol}/${quote.symbol} market created`, message: 'Place the first order to start the book.', link: explorerTx(res.signature) });
       go(res.market);
     } catch (err) {
-      if (!isUserRejection(err)) setError(err.message);
+      if (!isUserRejection(err)) {
+        setError(err.message);
+        reportError('create_market_failed', err, { wallet: publicKey?.toBase58() });
+      }
       setStage({ step: 'confirm', prepared });
     }
   }

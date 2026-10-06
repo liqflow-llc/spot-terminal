@@ -25,6 +25,7 @@ import {
     orderEconomics, quoteForBase, unwrapSolIx, withdrawIx, wrapSolIxs,
 } from '../venues/manifest/instructions.js';
 import { parseBatchUpdateReturn } from '../venues/manifest/fills.js';
+import { errorDetail, log, short } from '../log.js';
 import { claimReservations } from './orderStore.js';
 
 const PLACE_CU = 400_000;
@@ -72,6 +73,20 @@ function parseWallet(wallet) {
     } catch {
         throw new UserError('Invalid wallet address');
     }
+}
+
+/** The bits of a pending request worth seeing in a log line. */
+function describePending(p) {
+    if (p.kind === 'order') {
+        const o = p.order;
+        return { market: short(o.market), side: o.side, price: o.price, base: o.baseAtoms, nonce: short(o.nonce) };
+    }
+    if (p.kind === 'swap') return { in: p.result?.inAmount, out: p.result?.outAmount, price: p.result?.price };
+    if (p.kind === 'cancel') return { order: p.orderId };
+    if (p.kind === 'createMarket') return { market: short(p.market) };
+    if (p.kind === 'closePayout') return { accounts: p.nonceAddresses?.length, sol: p.refundLamports / 1e9 };
+    if (p.kind === 'setup') return { accounts: p.nonceAddresses?.length };
+    return {};
 }
 
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
@@ -374,7 +389,7 @@ export class OrderService {
         if (sim.value.err) {
             const logs = sim.value.logs || [];
             const hint = logs.filter(l => /Error|error|insufficient|failed/.test(l)).slice(-3).join(' | ');
-            console.warn('Simulation failed:', JSON.stringify(sim.value.err), hint);
+            log.warn('orders', 'simulation_failed', { err: sim.value.err, hint });
             throw new UserError(`The order would fail on-chain: ${hint || JSON.stringify(sim.value.err)}`);
         }
         return sim.value;
@@ -411,7 +426,29 @@ export class OrderService {
         return signature;
     }
 
-    async submit({ id, signed }) {
+    /** Send signed transactions; logs one line per outcome so problems show up in the logs. */
+    async submit(body) {
+        const pending = this.pending.get(body?.id);
+        const started = Date.now();
+        try {
+            const result = await this.submitInner(body);
+            if (pending) {
+                log.info('orders', `${pending.kind}_ok`, {
+                    wallet: short(pending.wallet), ...describePending(pending), order: result.orderId, sig: result.signature, ms: Date.now() - started,
+                });
+            }
+            return result;
+        } catch (err) {
+            if (pending) {
+                const fields = { wallet: short(pending.wallet), ...describePending(pending), msg: errorDetail(err), ms: Date.now() - started };
+                if (err instanceof UserError) log.warn('orders', `${pending.kind}_failed`, fields);
+                else log.error('orders', `${pending.kind}_failed`, fields);
+            }
+            throw err;
+        }
+    }
+
+    async submitInner({ id, signed }) {
         const pending = this.pending.get(id);
         if (!pending) throw new UserError('This request expired, please try again');
         const txs = this.verifySigned(pending, signed);
@@ -471,7 +508,7 @@ export class OrderService {
         const tx = await connection.getTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
         // The place transaction holds exactly one batch update placing one order.
         const sequenceNumber = parseBatchUpdateReturn(tx?.meta?.logMessages)?.[0] ?? null;
-        if (!sequenceNumber) console.warn(`Order ${order.id}: could not read its sequence number (truncated logs?)`);
+        if (!sequenceNumber) log.error('orders', 'no_sequence_number', { order: order.id, sig: signature, note: 'keeper will not auto-claim this order' });
         this.store.update(order.id, {
             status: 'open',
             placeSignature: signature,
@@ -613,7 +650,7 @@ export class OrderService {
         });
         if (sim.value.err) {
             const hint = (sim.value.logs || []).filter(l => /Error|error|insufficient|failed/.test(l)).slice(-3).join(' | ');
-            console.warn('Create market simulation failed:', JSON.stringify(sim.value.err), hint);
+            log.warn('orders', 'create_market_simulation_failed', { err: sim.value.err, hint });
             throw new UserError(walletInfo && walletInfo.lamports < 10_000_000
                 ? 'Not enough SOL in your wallet to create a market.'
                 : `Creating the market would fail on-chain: ${hint || JSON.stringify(sim.value.err)}`);

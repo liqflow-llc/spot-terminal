@@ -14,6 +14,7 @@ import WebSocket from 'ws';
 import { PublicKey } from '@solana/web3.js';
 import { connection } from '../../solana.js';
 import { isHelius, rpc } from '../../rpcRaw.js';
+import { log } from '../../log.js';
 
 export const ARCHER_PROGRAM_ID = new PublicKey('Archer8kgiavM61GyusMzaaS2ft5sALtNsD1HxkUPMhy');
 const STREAM_URL = 'wss://api.archer.exchange/v1/stream';
@@ -37,7 +38,7 @@ export class ArcherVenue extends EventEmitter {
     }
 
     start() {
-        const run = () => this.discover().catch(err => console.error('Archer: market discovery failed:', err.message));
+        const run = () => this.discover().catch(err => log.warn('archer', 'discovery_failed', { msg: err.message }));
         run();
         setInterval(run, DISCOVER_EVERY_MS).unref();
         // Stay connected: the mini_tickers feed says which markets are actually trading.
@@ -75,7 +76,7 @@ export class ArcherVenue extends EventEmitter {
                 quoteMint: new PublicKey(data.subarray(32, 64)).toBase58(),
             });
         }
-        console.log(`Archer: ${this.markets.size} markets`);
+        log.info('archer', 'discovered', { markets: this.markets.size });
     }
 
     /**
@@ -134,6 +135,8 @@ export class ArcherVenue extends EventEmitter {
         this.ws = ws;
         let ping = null;
         ws.on('open', () => {
+            this.connected = true;
+            if (this.reconnectDelay > 1000) log.info('archer', 'stream_reconnected');
             this.reconnectDelay = 1000;
             this.send({ op: 'subscribe', channels: ['mini_tickers'] });
             for (const address of this.subs.keys()) this.send({ op: 'subscribe', channels: ['orderbook'], market: address });
@@ -153,11 +156,13 @@ export class ArcherVenue extends EventEmitter {
                 }
             }
             else if (msg.op === 'reconnect') ws.close();
-            else if (msg.op === 'error') console.error('Archer stream error:', JSON.stringify(msg).slice(0, 200));
+            else if (msg.op === 'error') log.warn('archer', 'stream_error', { code: msg.code, msg: msg.message });
         });
-        ws.on('error', (err) => console.error('Archer stream:', err.message));
-        ws.on('close', () => {
+        ws.on('error', (err) => log.warn('archer', 'stream_failed', { msg: err.message }));
+        ws.on('close', (code) => {
             clearInterval(ping);
+            this.connected = false;
+            log.warn('archer', 'stream_closed', { code, retryInMs: this.reconnectDelay });
             this.ws = null;
             this.books.clear();
             if (!this.subs.size && !this.keepAlive) return;

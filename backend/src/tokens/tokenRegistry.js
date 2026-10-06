@@ -9,6 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import { config } from '../config.js';
+import { log } from '../log.js';
 
 const JUP_API = 'https://api.jup.ag';
 const CACHE_FILE = path.join(config.dataDir, 'token-cache.json');
@@ -70,9 +71,9 @@ export class TokenRegistry {
             for (const t of saved.tokens || []) {
                 if (!BUILTIN[t.mint]) this.tokens.set(t.mint, t);
             }
-            console.log(`TokenRegistry: loaded ${this.tokens.size} tokens from disk`);
+            log.info('tokens', 'cache_loaded', { tokens: this.tokens.size });
         } catch (err) {
-            console.error('TokenRegistry: failed to load cache file:', err.message);
+            log.warn('tokens', 'cache_load_failed', { msg: err.message });
         }
     }
 
@@ -86,7 +87,7 @@ export class TokenRegistry {
                 fs.writeFileSync(tmp, JSON.stringify({ savedAt: Date.now(), tokens: [...this.tokens.values()] }));
                 fs.renameSync(tmp, CACHE_FILE);
             } catch (err) {
-                console.error('TokenRegistry: failed to save cache file:', err.message);
+                log.warn('tokens', 'cache_save_failed', { msg: err.message });
             }
         }, 5000);
     }
@@ -143,7 +144,7 @@ export class TokenRegistry {
             try {
                 await this.fetchFromDas(chunk);
             } catch (err) {
-                console.error(`TokenRegistry: DAS batch failed (${chunk.length} mints):`, err.message);
+                log.warn('tokens', 'das_failed', { mints: chunk.length, msg: err.message });
             }
             const noDecimals = chunk.filter(m => !this.hasDecimals(m));
             for (let j = 0; j < noDecimals.length; j += MINT_ACCOUNT_BATCH) {
@@ -151,7 +152,7 @@ export class TokenRegistry {
                 try {
                     await this.fetchMintAccounts(sub);
                 } catch (err) {
-                    console.error('TokenRegistry: mint account lookup failed:', err.message);
+                    log.warn('tokens', 'mint_lookup_failed', { msg: err.message });
                 }
             }
             const now = Date.now();
@@ -256,10 +257,10 @@ export class TokenRegistry {
                 });
                 if (typeof t.usdPrice === 'number' && t.usdPrice > 0) this.setPrice(t.id, t.usdPrice, now);
             }
-            console.log(`TokenRegistry: refreshed ${list.length} verified tokens from Jupiter`);
+            log.info('tokens', 'verified_refreshed', { tokens: list.length });
             this.scheduleSave();
         } catch (err) {
-            console.error('TokenRegistry: verified list refresh failed:', err.message);
+            log.warn('jupiter', 'verified_list_failed', { msg: err.message });
         }
     }
 
@@ -312,7 +313,7 @@ export class TokenRegistry {
                 }
             }
         } catch (err) {
-            console.error('TokenRegistry: price fetch failed:', err.message);
+            log.warn('jupiter', 'price_failed', { msg: err.message });
         } finally {
             mints.forEach(m => this.priceInflight.delete(m));
         }

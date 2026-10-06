@@ -7,6 +7,9 @@ import '@solana/wallet-adapter-react-ui/styles.css';
 import './index.css';
 import App from './App.jsx';
 import { ToastProvider } from './components/Toasts.jsx';
+import { installGlobalErrorReporting } from './services/report';
+
+installGlobalErrorReporting();
 
 // Wallets that implement the Wallet Standard (Phantom, Solflare, Backpack, ...) are detected
 // automatically, so no adapters are listed here.

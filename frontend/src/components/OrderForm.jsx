@@ -10,6 +10,7 @@ import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing'
 import { formatAmount, formatPrice, priceDecimals, toInputString } from '../utils/format';
 import '../legal/Legal.css';
 import './OrderForm.css';
+import { reportError } from '../services/report';
 
 const SOL = 'So11111111111111111111111111111111111111112';
 const SOL_RESERVE = 0.02; // keep some SOL for fees and token-account rent
@@ -190,7 +191,10 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
       onPlaced?.();
     } catch (err) {
       if (isUserRejection(err)) toast({ title: 'Cancelled in wallet' });
-      else toast({ kind: 'error', title: 'Order not placed', message: err.message });
+      else {
+        toast({ kind: 'error', title: 'Order not placed', message: err.message });
+        reportError('limit_order_failed', err, { wallet: publicKey?.toBase58(), market: market.address });
+      }
     } finally {
       setBusy(null);
     }

@@ -5,6 +5,7 @@ import { useToast } from './Toasts.jsx';
 import { postJSON } from '../services/api';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
 import { formatAmount, formatDateTime, formatPrice } from '../utils/format';
+import { reportError } from '../services/report';
 import './AccountPanel.css';
 
 const OPEN = new Set(['placing', 'open', 'claiming']);
@@ -41,7 +42,10 @@ export default function AccountPanel({ account, market, wallet, onChange }) {
       onChange?.();
     } catch (err) {
       if (isUserRejection(err)) toast({ title: 'Cancelled in wallet' });
-      else toast({ kind: 'error', title: 'Failed', message: err.message });
+      else {
+        toast({ kind: 'error', title: 'Failed', message: err.message });
+        reportError(`${request.url.split('/').pop()}_failed`, err, { wallet, market: market?.address });
+      }
     } finally {
       setBusy(null);
     }

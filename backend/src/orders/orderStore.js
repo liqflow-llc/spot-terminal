@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import { config } from '../config.js';
 import { quoteForBase } from '../venues/manifest/instructions.js';
+import { log } from '../log.js';
 
 const FILE = path.join(config.dataDir, 'orders.json');
 
@@ -22,7 +23,7 @@ export class OrderStore {
             const saved = JSON.parse(fs.readFileSync(FILE, 'utf8'));
             for (const o of saved.orders || []) this.orders.set(o.id, o);
             for (const [k, v] of Object.entries(saved.nonces || {})) this.nonces.set(k, v);
-            console.log(`OrderStore: ${this.orders.size} orders, ${this.nonces.size} nonce accounts`);
+            log.info('orders', 'store_loaded', { orders: this.orders.size, nonces: this.nonces.size });
         } catch {
             // First run.
         }

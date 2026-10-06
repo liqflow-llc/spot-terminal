@@ -1,6 +1,7 @@
 // 24h volume / price change per Manifest market from GeckoTerminal, used until our own data
 // covers a full day (after a fresh start our counters only know the last hour or so).
 import { geckoFetch } from './gecko.js';
+import { log } from '../log.js';
 
 const GT_MULTI = 'https://api.geckoterminal.com/api/v2/networks/solana/pools/multi';
 const BATCH = 30;
@@ -14,7 +15,7 @@ export class GeckoStats {
     }
 
     start() {
-        const run = () => this.refresh().catch(err => console.error('GeckoTerminal stats failed:', err.message));
+        const run = () => this.refresh().catch(err => log.warn('gecko', 'stats_failed', { msg: err.message }));
         run();
         setInterval(run, REFRESH_MS).unref();
     }
@@ -32,7 +33,7 @@ export class GeckoStats {
             try {
                 json = await geckoFetch(`${GT_MULTI}/${chunk.join(',')}`, { priority: 'low' });
             } catch (err) {
-                console.error('GeckoTerminal stats batch failed:', err.message);
+                log.warn('gecko', 'stats_batch_failed', { msg: err.message });
             }
             if (json) {
                 const now = Date.now();

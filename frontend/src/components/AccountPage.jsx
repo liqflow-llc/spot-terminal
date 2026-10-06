@@ -8,6 +8,7 @@ import { getJSON, postJSON } from '../services/api';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
 import '../legal/Legal.css';
 import './AccountPage.css';
+import { reportError } from '../services/report';
 
 const sol = (n) => `${Number(n || 0).toFixed(5)} SOL`;
 
@@ -36,7 +37,10 @@ export default function AccountPage() {
       const res = await signAndSubmit(prepared, signAllTransactions);
       toast({ kind: 'success', title: `Refunded ${sol(res.refundedSol)}`, link: explorerTx(res.signature) });
     } catch (err) {
-      if (!isUserRejection(err)) toast({ kind: 'error', title: 'Refund failed', message: err.message });
+      if (!isUserRejection(err)) {
+        toast({ kind: 'error', title: 'Refund failed', message: err.message });
+        reportError('refund_failed', err, { wallet });
+      }
     } finally {
       setBusy(null);
       load();
