@@ -6,6 +6,7 @@ import { getJSON } from '../services/api';
 import { useFavorites } from '../hooks/useFavorites';
 import { formatPct, formatPrice, formatUsd, formatAmount, shortAddress } from '../utils/format';
 import './MarketHeader.css';
+import { VENUE_INFO } from '../venues';
 
 const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
@@ -277,7 +278,7 @@ export default function MarketHeader({ market }) {
             value={market.volume24hQuote != null ? formatAmount(market.volume24hQuote) : '—'}
             title={market.volumeWindowHours != null && market.volumeWindowHours < 24 ? `Measured over the last ${market.volumeWindowHours}h so far` : undefined}
           />
-          <Stat label="Venue" value="Manifest" title="Zero-fee on-chain order book; Jupiter routes swaps through it" />
+          <Stat label="Venue" value="Manifest" title={VENUE_INFO.manifest} />
           <TokenAddress token={market.base} market={market.address} />
         </div>
       )}

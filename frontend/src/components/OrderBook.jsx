@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { formatAmount, formatPrice, priceDecimals, shortAddress } from '../utils/format';
 import './OrderBook.css';
+import { VENUE_INFO } from '../venues';
 
 const ROW_HEIGHT = 20;
 
@@ -109,11 +110,15 @@ export default function OrderBook({ book, market, onPick }) {
         )}
       </div>
       {/* Always rendered (fixed height) so the book doesn't jump when the sources arrive. */}
-      <div className="ob-foot muted" title={book?.sources?.map(s => `${s.venue} ${s.market}${s.inverted ? ' (inverted)' : ''}`).join('\n')}>
+      <div className="ob-foot muted">
         {!book ? '\u00a0' : hasArcher
-          ? <><span className="venue-badge archer">A</span> = Archer depth: market orders can take it (via Jupiter); limit orders rest on Manifest</>
-          : sourceCount > 1 ? `Aggregated from ${sourceCount} Manifest markets for this pair` : 'Source: Manifest'}
+          ? <><span className="venue-badge archer" title={VENUE_INFO.archer}>A</span> = <Venue id="archer">Archer</Venue> order, other orders sit on <Venue id="manifest">Manifest</Venue></>
+          : sourceCount > 1 ? <>Aggregated from {sourceCount} <Venue id="manifest">Manifest</Venue> markets for this pair</> : <>Source: <Venue id="manifest">Manifest</Venue></>}
       </div>
     </>
   );
+}
+
+function Venue({ id, children }) {
+  return <span className="venue-name" title={VENUE_INFO[id]}>{children}</span>;
 }
