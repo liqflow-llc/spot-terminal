@@ -39,3 +39,5 @@
 .of-summary div { display: flex; justify-content: space-between; gap: 8px; }
 .of-summary dt { color: var(--muted); }
 .of-summary dd { margin: 0; text-align: right; }
+.risk-note ul { margin: 4px 0 0; padding-left: 16px; }
+.risk-note li { margin: 2px 0; }

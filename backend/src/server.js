@@ -6,6 +6,7 @@ import { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID 
 import { config } from './config.js';
 import { connection } from './solana.js';
 import { TokenRegistry } from './tokens/tokenRegistry.js';
+import { tokenWarnings } from './tokens/tokenRisk.js';
 import { ManifestMarkets } from './venues/manifest/markets.js';
 import { ArcherVenue } from './venues/archer/archer.js';
 import { TradeStore, SUPPORTED_RESOLUTIONS } from './marketdata/tradeStore.js';
@@ -236,6 +237,24 @@ app.get('/api/markets/:address/reference', rateLimit('reference', 60, 60_000), a
         res.json({ price: await referencePrice(req.params.address), source: 'Jupiter', at: Date.now() });
     } catch {
         res.json({ price: null, source: 'Jupiter', at: Date.now() });
+    }
+});
+
+// Token safety warnings for the order form (unverified tokens only; see tokens/tokenRisk.js).
+app.get('/api/markets/:address/risk', rateLimit('risk', 30, 60_000), async (req, res) => {
+    const s = requireMarket(req, res);
+    if (!s) return;
+    try {
+        const v = marketView(s);
+        const [base, quote] = await Promise.all([
+            tokenWarnings(registry, s.baseMint, v.base.symbol),
+            tokenWarnings(registry, s.quoteMint, v.quote.symbol),
+        ]);
+        res.set('Cache-Control', 'public, max-age=60');
+        res.json({ base, quote });
+    } catch (err) {
+        log.warn('api', 'risk_failed', { market: short(s.address), msg: err.message });
+        res.json({ base: [], quote: [], error: 'Could not check the tokens' });
     }
 });
 

@@ -11,6 +11,8 @@ import { formatAmount, formatPrice, priceDecimals, toInputString } from '../util
 import '../legal/Legal.css';
 import './OrderForm.css';
 import { reportError } from '../services/report';
+import TokenRiskNote from './TokenRiskNote.jsx';
+import { useTokenRisk } from '../hooks/useTokenRisk';
 
 const SOL = 'So11111111111111111111111111111111111111112';
 const SOL_RESERVE = 0.02; // keep some SOL for fees and token-account rent
@@ -95,6 +97,8 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
 
   const referenceFor = (address) => (reference && reference.address === address ? reference.price : null);
   const p = Number(price), a = Number(amount);
+  // Warnings about the tokens only once someone starts filling the form in.
+  const riskWarnings = useTokenRisk(market?.address, orderType === 'limit' && (a > 0 || priceTouched.current));
   const refPrice = reference && reference.address === market?.address ? reference.price : undefined;
   const off = adverseDeviation(side, p, refPrice);
   const risky = off != null && off > WARN_DEVIATION;
@@ -256,6 +260,8 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
       {crosses && postOnly && (
         <div className="of-note warn">Post-only: this price crosses the book and would be rejected.</div>
       )}
+
+      <TokenRiskNote warnings={riskWarnings} />
 
       <button
         type="button"

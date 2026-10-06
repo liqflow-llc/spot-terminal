@@ -7,6 +7,8 @@ import { postJSON } from '../services/api';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
 import { formatAmount, formatPrice, toInputString } from '../utils/format';
 import { reportError } from '../services/report';
+import TokenRiskNote from './TokenRiskNote.jsx';
+import { useTokenRisk } from '../hooks/useTokenRisk';
 
 const SOL = 'So11111111111111111111111111111111111111112';
 const SOL_RESERVE = 0.02;
@@ -49,6 +51,7 @@ export default function MarketOrder({ market, side, account, onPlaced }) {
   }, [account, isBuy, inToken.mint]);
 
   const a = Number(amount);
+  const riskWarnings = useTokenRisk(market.address, a > 0);
   const key = `${market.address}|${side}|${amount}|${slippageBps}`;
 
   // Live quote while typing (debounced) and every few seconds after.
@@ -168,6 +171,8 @@ export default function MarketOrder({ market, side, account, onPlaced }) {
           {q.priceImpact > WARN_DEVIATION ? 'This order is large for the available liquidity.' : 'Check the amount and slippage.'}
         </div>
       )}
+
+      <TokenRiskNote warnings={riskWarnings} />
 
       <button
         type="button"
