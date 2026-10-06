@@ -12,9 +12,10 @@
 //  - A wallet's first order needs a one-time setup transaction that creates its nonce accounts
 //    (refundable rent), because a claim must reference a nonce that already exists on-chain.
 import crypto from 'crypto';
+import bs58 from 'bs58';
 import {
-    ComputeBudgetProgram, Keypair, NONCE_ACCOUNT_LENGTH, NonceAccount, PublicKey,
-    SystemProgram, Transaction, VersionedTransaction,
+    AddressLookupTableAccount, ComputeBudgetProgram, Keypair, NONCE_ACCOUNT_LENGTH, NonceAccount, PublicKey,
+    SystemProgram, Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction,
 } from '@solana/web3.js';
 import { Market } from '@bonasa-tech/manifest-sdk';
 import { getAssociatedTokenAddressSync, NATIVE_MINT, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
@@ -91,6 +92,46 @@ function describePending(p) {
     if (p.kind === 'closePayout') return { accounts: p.nonceAddresses?.length, sol: p.refundLamports / 1e9 };
     if (p.kind === 'setup') return { accounts: p.nonceAddresses?.length };
     return {};
+}
+
+/**
+ * A Jupiter Swap API v2 /build response as an unsigned v0 transaction paid by the wallet.
+ * Jupiter includes each lookup table's addresses, so no extra RPC calls are needed.
+ */
+export function buildJupiterTransaction(built, payer) {
+    const toIx = (i) => new TransactionInstruction({
+        programId: new PublicKey(i.programId),
+        keys: i.accounts.map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: a.isSigner, isWritable: a.isWritable })),
+        data: Buffer.from(i.data, 'base64'),
+    });
+    const instructions = [
+        ...(built.computeBudgetInstructions || []),
+        ...(built.setupInstructions || []),
+        built.swapInstruction,
+        built.cleanupInstruction,
+        ...(built.otherInstructions || []),
+        built.tipInstruction,
+    ].filter(Boolean).map(toIx);
+    // Make sure it carries a priority fee (Jupiter's budget instructions may only set the CU limit).
+    const SET_PRICE = 3;
+    if (!instructions.some(ix => ix.programId.equals(ComputeBudgetProgram.programId) && ix.data[0] === SET_PRICE)) {
+        instructions.unshift(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_MICROLAMPORTS }));
+    }
+    const lookupTables = Object.entries(built.addressesByLookupTableAddress || {}).map(([key, addresses]) => new AddressLookupTableAccount({
+        key: new PublicKey(key),
+        state: { deactivationSlot: 2n ** 64n - 1n, lastExtendedSlot: 0, lastExtendedSlotStartIndex: 0, addresses: addresses.map(a => new PublicKey(a)) },
+    }));
+    const blockhash = bs58.encode(Uint8Array.from(built.blockhashWithMetadata.blockhash));
+    const message = new TransactionMessage({ payerKey: payer, recentBlockhash: blockhash, instructions }).compileToV0Message(lookupTables);
+    return new VersionedTransaction(message);
+}
+
+function fitsInPacket(tx) {
+    try {
+        return tx.serialize().length <= 1232;
+    } catch {
+        return false; // serialize throws when the transaction overruns the packet size
+    }
 }
 
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
@@ -404,7 +445,7 @@ export class OrderService {
     }
 
     async simulateOrThrow(tx, extraSigners = []) {
-        const v = new VersionedTransaction(tx.compileMessage());
+        const v = tx instanceof VersionedTransaction ? tx : new VersionedTransaction(tx.compileMessage());
         const sim = await connection.simulateTransaction(v, { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed' });
         if (sim.value.err) {
             const logs = sim.value.logs || [];
@@ -564,7 +605,7 @@ export class OrderService {
      * Archer, AMMs) for the best price. Buys spend `amount` quote tokens; sells sell `amount`
      * base tokens.
      */
-    async quoteSwap({ market, side, amount, slippageBps = 50 }) {
+    async quoteSwap({ market, side, amount, slippageBps = 50, wallet = null, maxAccounts = null }) {
         if (!this.jupiter) throw new UserError('Market orders are unavailable');
         if (side !== 'buy' && side !== 'sell') throw new UserError('side must be buy or sell');
         const s = this.markets.summary(market);
@@ -578,14 +619,17 @@ export class OrderService {
         const inAtoms = toAtoms(amount, inDecimals);
         if (inAtoms <= 0n) throw new UserError('Enter an amount');
 
-        const key = `${inMint}|${outMint}|${inAtoms}|${slippage}`;
+        // Swap API v2 /build quotes and returns the instructions in one call. It needs a taker;
+        // without a wallet (just previewing) the keeper's address stands in: same route and amounts.
+        const taker = wallet ? parseWallet(wallet).toBase58() : this.keeperPubkey.toBase58();
+        const key = `${inMint}|${outMint}|${inAtoms}|${slippage}|${taker}|${maxAccounts}`;
         const cached = this.quoteCache.get(key);
         let quote = cached && Date.now() - cached.at < QUOTE_CACHE_MS ? cached.quote : null;
         if (!quote) {
             try {
-                quote = await this.jupiter(`/swap/v1/quote?inputMint=${inMint}&outputMint=${outMint}&amount=${inAtoms}&slippageBps=${slippage}&restrictIntermediateTokens=true`);
+                quote = await this.jupiter(`/swap/v2/build?inputMint=${inMint}&outputMint=${outMint}&amount=${inAtoms}&slippageBps=${slippage}&taker=${taker}${maxAccounts ? `&maxAccounts=${maxAccounts}` : ''}`);
             } catch (err) {
-                if (err.status === 400) throw new UserError('No route found for this trade on any Solana venue.');
+                if (err.status === 400 || err.status === 404) throw new UserError('No route found for this trade on any Solana venue.');
                 throw err;
             }
             this.quoteCache.set(key, { at: Date.now(), quote });
@@ -614,7 +658,17 @@ export class OrderService {
 
     async prepareSwap({ wallet, market, side, amount, slippageBps, acknowledgePriceRisk = false }) {
         const walletPk = parseWallet(wallet);
-        const { quote, summary } = await this.quoteSwap({ market, side, amount, slippageBps });
+        // Long multi-hop routes can come out bigger than a transaction allows; then ask again for a
+        // route that touches fewer accounts (usually a hair worse price, shown before signing).
+        let quote, summary, tx;
+        for (const maxAccounts of [null, 40, 28]) {
+            ({ quote, summary } = await this.quoteSwap({ market, side, amount, slippageBps, wallet: walletPk.toBase58(), maxAccounts }));
+            tx = buildJupiterTransaction(quote, walletPk);
+            if (fitsInPacket(tx)) break;
+            log.info('orders', 'swap_route_too_big', { maxAccounts, hops: quote.routePlan?.length });
+            tx = null;
+        }
+        if (!tx) throw new UserError('Could not fit this trade in one transaction. Try a smaller amount.');
         // Judge the WORST price the order allows (slippage included), not the hoped-for one.
         const off = Math.max(summary.deviation ?? -1, summary.priceImpact);
         if (!acknowledgePriceRisk && off > PRICE_WARN_DEVIATION) {
@@ -622,35 +676,19 @@ export class OrderService {
             err.code = 'PRICE_DEVIATION';
             throw err;
         }
-        let built;
-        try {
-            built = await this.jupiter('/swap/v1/swap', {
-                method: 'POST',
-                body: {
-                    quoteResponse: quote,
-                    userPublicKey: walletPk.toBase58(),
-                    wrapAndUnwrapSol: true,
-                    dynamicComputeUnitLimit: true,
-                    prioritizationFeeLamports: { priorityLevelWithMaxLamports: { maxLamports: SWAP_MAX_PRIORITY_LAMPORTS, priorityLevel: 'high' } },
-                },
-            });
-        } catch (err) {
-            throw new UserError(`Jupiter could not build this trade: ${err.message.replace(/^Jupiter API \d+ for [^:]+: /, '')}`);
-        }
-        if (built.simulationError) throw new UserError(`The trade would fail: ${JSON.stringify(built.simulationError).slice(0, 200)}`);
-        const tx = VersionedTransaction.deserialize(Buffer.from(built.swapTransaction, 'base64'));
+        await this.simulateOrThrow(tx);
         const id = crypto.randomUUID();
         this.pending.set(id, {
             kind: 'swap', versioned: true, wallet: walletPk.toBase58(), createdAt: Date.now(),
             messages: [Buffer.from(tx.message.serialize())],
-            blockhash: tx.message.recentBlockhash, lastValidBlockHeight: built.lastValidBlockHeight,
+            blockhash: tx.message.recentBlockhash, lastValidBlockHeight: quote.blockhashWithMetadata.lastValidBlockHeight,
             result: { inAmount: summary.inAmount, outAmount: summary.outAmount, price: summary.price },
         });
         return {
             step: 'sign',
             id,
             versioned: true,
-            transactions: [built.swapTransaction],
+            transactions: [Buffer.from(tx.serialize()).toString('base64')],
             summary: { title: `Market ${side}`, ...summary },
         };
     }
