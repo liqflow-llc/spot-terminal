@@ -14,6 +14,8 @@ const STORAGE = [
   ['walletName', 'localStorage', 'Which wallet you connected, so it reconnects next time.', 'Until you disconnect'],
   ['spot.favoriteMarkets', 'localStorage', 'Markets you starred.', 'Until you clear it'],
   ['tradingview.*', 'localStorage', 'Chart settings you change (indicators, chart type).', 'Until you clear it'],
+  ['sw.js (service worker)', 'Service worker', 'Shows order notifications; installed only if you turn them on.', 'Until you clear site data'],
+  ['spot.quoteFilter', 'localStorage', 'The SOL / USDC pairs filter you picked.', 'Until you clear it'],
 ];
 
 export default function Privacy() {
@@ -51,6 +53,12 @@ export default function Privacy() {
             Service must keep to pay your order out</li>
           <li>The payout accounts created for your wallet</li>
         </ul>
+        <h3>If you turn on notifications</h3>
+        <p>
+          Your browser gives the Service an anonymous push address (a long URL at your browser
+          maker&apos;s push service). It is stored with your wallet address so order updates (filled
+          and paid out, expired, needs attention) reach you. Turning notifications off deletes it.
+        </p>
         <h3>When you simply browse</h3>
         <ul>
           <li>The web server keeps standard access logs (IP address, page requested, browser
@@ -81,6 +89,9 @@ export default function Privacy() {
             wallet addresses and transactions the server looks up or sends for you.</li>
           <li><strong>The Solana network</strong> &mdash; every transaction you sign is public,
             permanently.</li>
+          <li><strong>Your browser&apos;s push service</strong> (Google for Chrome, Mozilla for Firefox,
+            Apple for Safari) &mdash; only if you turn on notifications; it delivers each notification&apos;s
+            text to your device.</li>
           <li><strong>Your wallet provider</strong> (Phantom, Solflare, &hellip;) under its own
             privacy policy.</li>
         </ul>
@@ -112,6 +123,8 @@ export default function Privacy() {
             hold pending payouts and your order history. They are included in the server&apos;s
             encrypted backups.</li>
           <li><strong>Access logs</strong> &mdash; {ACCESS_LOG_DAYS} days.</li>
+          <li><strong>Notification push addresses</strong> &mdash; until you turn notifications off or
+            your browser revokes them.</li>
           <li><strong>Anything on the blockchain</strong> &mdash; forever. No one can delete it.</li>
         </ul>
 

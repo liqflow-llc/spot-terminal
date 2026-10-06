@@ -19,3 +19,5 @@
 .ap-actions .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .edit-order { display: flex; flex-direction: column; gap: 10px; min-width: min(360px, 80vw); }
 .edit-order .small { font-size: 12px; margin: 0; }
+.ap-title-actions { display: flex; gap: 6px; align-items: center; }
+.bell.on { border-color: var(--accent); color: var(--text); }

@@ -8,6 +8,7 @@ import { formatAmount, formatDateTime, formatPrice } from '../utils/format';
 import { reportError } from '../services/report';
 import './AccountPanel.css';
 import EditOrderModal from './EditOrderModal.jsx';
+import { usePushNotifications } from '../hooks/usePushNotifications';
 
 const OPEN = new Set(['placing', 'open', 'claiming', 'expired', 'replacing']);
 const TABS = ['Open orders', 'Order history', 'Balances'];
@@ -32,6 +33,7 @@ export default function AccountPanel({ account, market, wallet, onChange, action
   const [tab, setTab] = useState(TABS[0]);
   const [busy, setBusy] = useState(null);
   const [editing, setEditing] = useState(null);
+  const push = usePushNotifications(wallet);
 
   const orders = account?.orders || [];
   const open = orders.filter(o => OPEN.has(o.status));
@@ -77,11 +79,26 @@ export default function AccountPanel({ account, market, wallet, onChange, action
             </button>
           ))}
         </div>
+        <div className="ap-title-actions">
+        {wallet && push.status !== 'unsupported' && (
+          <button
+            type="button"
+            className={`btn small bell ${push.status === 'on' ? 'on' : ''}`}
+            disabled={push.status === 'working' || push.status === 'blocked'}
+            onClick={push.status === 'on' ? push.disable : push.enable}
+            title={push.status === 'blocked'
+              ? 'Notifications are blocked for this site in your browser settings'
+              : push.status === 'on' ? 'You get a notification when an order fills. Click to turn off.' : 'Get a notification when an order fills, even with the site closed'}
+          >
+            {push.status === 'on' ? '🔔 Notifications on' : push.status === 'blocked' ? '🔕 Blocked' : '🔔 Notify me'}
+          </button>
+        )}
         {tab === 'Open orders' && cancellable.length > 1 && (
           <button type="button" className="btn small" disabled={busy === 'cancel-all'} onClick={cancelAll} title="Cancel every open order on this market and return the funds">
             {busy === 'cancel-all' ? '…' : `Cancel all (${cancellable.length})`}
           </button>
         )}
+        </div>
       </div>
       <div className="ap-body">
         {!wallet ? (

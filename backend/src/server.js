@@ -18,6 +18,7 @@ import { GeckoStats } from './marketdata/geckoStats.js';
 import { errorDetail, log, short, takeProblemCounts } from './log.js';
 import { takeRpcStats } from './rpcStats.js';
 import { startLogRotation } from './logRotate.js';
+import { Notifier } from './notify.js';
 
 const registry = new TokenRegistry({ heliusRpc: config.rpcUrl, jupApiKey: config.jupApiKey });
 registry.startBackgroundRefresh();
@@ -50,6 +51,44 @@ const orders = new OrderService({
 });
 const keeper = new Keeper({ markets, store: orderStore, keypair: keeperKeypair });
 orders.onPlaced = (id) => keeper.track(id);
+
+// ---------- push notifications for order events ----------
+const notifier = new Notifier();
+const orderWords = (o) => {
+    const base = registry.display(o.baseMint).symbol, quote = registry.display(o.quoteMint).symbol;
+    const size = Number(o.baseAtoms) / 10 ** o.baseDecimals;
+    return { base, quote, size: size.toLocaleString('en-US', { maximumFractionDigits: 6 }), price: Number(o.price).toPrecision(6).replace(/\.?0+$/, '') };
+};
+keeper.on('claimed', (o) => {
+    if (!o) return;
+    const w = orderWords(o);
+    const got = Number(o.claimAtoms) / 10 ** (o.proceedsIsBase ? o.baseDecimals : o.quoteDecimals);
+    notifier.send(o.wallet, {
+        title: `${o.side === 'buy' ? 'Buy' : 'Sell'} order filled`,
+        body: `${o.side === 'buy' ? 'Bought' : 'Sold'} ${w.size} ${w.base} at ${w.price} ${w.quote}. ${got.toLocaleString('en-US', { maximumFractionDigits: 6 })} ${o.proceedsIsBase ? w.base : w.quote} sent to your wallet.`,
+        url: `/trade/${o.market}`, tag: o.id,
+    }).catch(() => {});
+});
+keeper.on('expired', (o) => {
+    if (!o) return;
+    const w = orderWords(o);
+    notifier.send(o.wallet, {
+        title: 'Order expired',
+        body: `Your ${o.side} of ${w.size} ${w.base} at ${w.price} ${w.quote} expired. Tap Withdraw to get the funds back.`,
+        url: `/trade/${o.market}`, tag: o.id,
+    }).catch(() => {});
+});
+for (const event of ['claim_failed', 'closed']) {
+    keeper.on(event, (o) => {
+        if (!o) return;
+        const w = orderWords(o);
+        notifier.send(o.wallet, {
+            title: 'Your order needs attention',
+            body: `Your ${o.side} of ${w.size} ${w.base} at ${w.price} couldn't pay out automatically. Withdraw it from the Balances tab.`,
+            url: `/trade/${o.market}`, tag: o.id,
+        }).catch(() => {});
+    });
+}
 
 markets.on('fills', (address, fills) => {
     const time = Date.now();
@@ -406,6 +445,20 @@ app.post('/api/orders/edit', writeLimit, handle(body => orders.prepareEdit(body)
 app.post('/api/orders/cancel-all', writeLimit, handle(body => orders.prepareCancelAll(body)));
 app.post('/api/orders/withdraw', writeLimit, handle(body => orders.prepareWithdraw(body)));
 app.post('/api/markets/create', writeLimit, handle(body => orders.prepareCreateMarket(body)));
+app.get('/api/push/key', (req, res) => res.json({ publicKey: notifier.publicKey }));
+app.post('/api/push/subscribe', writeLimit, handle(async ({ wallet, subscription }) => {
+    try {
+        notifier.subscribe(new PublicKey(String(wallet)).toBase58(), subscription);
+    } catch {
+        throw new UserError('Invalid wallet or subscription');
+    }
+    return { ok: true };
+}));
+app.post('/api/push/unsubscribe', writeLimit, handle(async ({ endpoint }) => {
+    notifier.unsubscribe(String(endpoint || ''));
+    return { ok: true };
+}));
+app.post('/api/push/status', rateLimit('account', 40, 60_000), handle(async ({ wallet, endpoint }) => ({ subscribed: notifier.isSubscribed(String(wallet), String(endpoint)) })));
 const quoteLimit = rateLimit('quote', 40, 60_000);
 app.post('/api/swap/quote', quoteLimit, handle(async body => (await orders.quoteSwap(body)).summary));
 app.post('/api/swap/prepare', writeLimit, handle(body => orders.prepareSwap(body)));
