@@ -2,6 +2,7 @@
 .account-main { width: 100%; max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; box-sizing: border-box; }
 .account-main h1 { font-size: 20px; margin: 0 0 16px; }
 .account-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+.account-card + .account-card { margin-top: 16px; }
 .account-card h2 { font-size: 15px; margin: 0; }
 .account-card p { margin: 0; }
 .account-card .small { font-size: 12px; }

@@ -65,6 +65,6 @@ solana-test-validator --reset --ledger /tmp/ledger \
   --url https://api.mainnet-beta.solana.com \
   --clone-upgradeable-program MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms
 cd backend && node test/localnet-e2e.mjs   # order/claim/cancel mechanics
-cd frontend && npm run build && cd ../backend && node test/ui-e2e.mjs
-                                            # the real UI in Chrome with a mock wallet
+cd frontend && npm run build:test && cd ../backend && node test/ui-e2e.mjs
+                                            # the real UI in Chrome with a mock wallet (builds to dist-test, never dist)
 ```

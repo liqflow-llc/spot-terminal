@@ -9,6 +9,7 @@ import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing'
 import '../legal/Legal.css';
 import './AccountPage.css';
 import { reportError } from '../services/report';
+import { usePushNotifications } from '../hooks/usePushNotifications';
 
 const sol = (n) => `${Number(n || 0).toFixed(5)} SOL`;
 
@@ -48,6 +49,7 @@ export default function AccountPage() {
   }
 
   const count = payout?.accounts.length || 0;
+  const push = usePushNotifications(wallet);
 
   return (
     <div className="app account-page">
@@ -102,6 +104,43 @@ export default function AccountPage() {
             )
           )}
         </section>
+
+        <section className="account-card">
+          <h2>Notifications</h2>
+          <p className="muted">
+            Get a notification on this device when an order fills and is paid out, expires, or needs
+            you to withdraw. Works with the site closed.
+          </p>
+          {!wallet ? (
+            <div className="account-connect">
+              <span>Connect your wallet to turn on notifications.</span>
+              <WalletMultiButton />
+            </div>
+          ) : push.status === 'unsupported' ? (
+            <p className="muted small">
+              This browser doesn&apos;t support notifications. On iPhone, add this site to your home screen
+              (Share → Add to Home Screen) and open it from there.
+            </p>
+          ) : push.status === 'blocked' ? (
+            <p className="muted small">Notifications are blocked for this site. Allow them in your browser&apos;s site settings, then reload.</p>
+          ) : (
+            <>
+              <div className="account-row">
+                {push.status === 'on' ? '🔔 On for this device' : '🔕 Off'}
+              </div>
+              <button
+                type="button"
+                className={`btn ${push.status === 'on' ? '' : 'primary'}`}
+                disabled={push.status === 'working'}
+                onClick={push.status === 'on' ? push.disable : push.enable}
+              >
+                {push.status === 'working' ? '…' : push.status === 'on' ? 'Turn off' : 'Turn on notifications'}
+              </button>
+              {push.error && <div className="account-row error">{push.error}</div>}
+            </>
+          )}
+        </section>
+
         <p className="legal-links account-legal">
           <Link to="/terms">Terms of Service</Link>
           <Link to="/privacy">Privacy Policy</Link>
