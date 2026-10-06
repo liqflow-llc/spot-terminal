@@ -3,7 +3,7 @@
 .market-header { scrollbar-width: none; }
 .market-header::-webkit-scrollbar { display: none; }
 .selector { position: relative; flex-shrink: 0; }
-.selector-btn { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 10px; background: none; border: 1px solid transparent; border-radius: var(--radius); cursor: pointer; }
+.selector-btn { display: flex; align-items: center; gap: 10px; height: 40px; min-width: 150px; padding: 0 10px; background: none; border: 1px solid transparent; border-radius: var(--radius); cursor: pointer; }
 .selector-btn:hover { background: var(--panel-2); border-color: var(--border-2); }
 .pair-icons { display: inline-flex; align-items: flex-end; }
 .pair-icons .token-icon + .token-icon { margin-left: -6px; border: 2px solid var(--panel); }

@@ -81,8 +81,6 @@ export default function Privacy() {
             attacks, and provides Cloudflare Web Analytics (cookieless page-view counts).</li>
           <li><strong>Plausible Analytics</strong> &mdash; cookieless, aggregate visit statistics. It
             does not store IP addresses or build profiles.</li>
-          <li><strong>Google Fonts</strong> &mdash; your browser loads the site&apos;s fonts from
-            Google, which sees your IP address.</li>
           <li><strong>Token icon hosts</strong> &mdash; token logos load directly from wherever each
             token&apos;s creator hosts them, which sees your IP address (no referrer is sent).</li>
           <li><strong>Helius</strong> &mdash; the Solana RPC provider the server uses; it receives the

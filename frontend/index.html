@@ -10,9 +10,8 @@
     <title>SpotBook · Solana order books</title>
     <meta name="description" content="Trade Solana tokens on on-chain order books with zero trading fees. Limit orders pay out to your wallet automatically when they fill." />
     <script defer data-domain="juporderbook.com" src="https://plausible.io/js/script.js"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <!-- The chart library is big and only requested once the app runs: start fetching it now. -->
+    <link rel="preload" href="/charting_library/charting_library.standalone.js" as="script" />
   </head>
   <body>
     <div id="root"></div>

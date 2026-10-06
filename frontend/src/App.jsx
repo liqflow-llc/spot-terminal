@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Navigate, Route, Routes, useSearchParams } from 'react-router-dom';
 import TradePage from './components/TradePage.jsx';
-import AccountPage from './components/AccountPage.jsx';
-import Terms from './legal/Terms.jsx';
-import Privacy from './legal/Privacy.jsx';
+import { lazy, Suspense } from 'react';
+// Pages most visits never open load on demand.
+const AccountPage = lazy(() => import('./components/AccountPage.jsx'));
+const Terms = lazy(() => import('./legal/Terms.jsx'));
+const Privacy = lazy(() => import('./legal/Privacy.jsx'));
+const pageFallback = <div className="boot"><span className="spinner" /></div>;
 import { getJSON } from './services/api';
 
 /** Send "/" to the busiest verified market. */
@@ -37,9 +40,9 @@ export default function App() {
     <Routes>
       <Route path="/" element={<DefaultMarket />} />
       <Route path="/trade/:address" element={<TradePage />} />
-      <Route path="/account" element={<AccountPage />} />
-      <Route path="/terms" element={<Terms />} />
-      <Route path="/privacy" element={<Privacy />} />
+      <Route path="/account" element={<Suspense fallback={pageFallback}><AccountPage /></Suspense>} />
+      <Route path="/terms" element={<Suspense fallback={pageFallback}><Terms /></Suspense>} />
+      <Route path="/privacy" element={<Suspense fallback={pageFallback}><Privacy /></Suspense>} />
       <Route path="/orderbook" element={<LegacyOrderbook />} />
       <Route path="*" element={<DefaultMarket />} />
     </Routes>

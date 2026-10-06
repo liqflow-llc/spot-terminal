@@ -108,13 +108,12 @@ export default function OrderBook({ book, market, onPick }) {
           </>
         )}
       </div>
-      {sourceCount > 1 && (
-        <div className="ob-foot muted" title={book.sources.map(s => `${s.venue} ${s.market}${s.inverted ? ' (inverted)' : ''}`).join('\n')}>
-          {hasArcher
-            ? <><span className="venue-badge archer">A</span> = Archer depth: market orders can take it (via Jupiter); limit orders rest on Manifest</>
-            : `Aggregated from ${sourceCount} Manifest markets for this pair`}
-        </div>
-      )}
+      {/* Always rendered (fixed height) so the book doesn't jump when the sources arrive. */}
+      <div className="ob-foot muted" title={book?.sources?.map(s => `${s.venue} ${s.market}${s.inverted ? ' (inverted)' : ''}`).join('\n')}>
+        {!book ? '\u00a0' : hasArcher
+          ? <><span className="venue-badge archer">A</span> = Archer depth: market orders can take it (via Jupiter); limit orders rest on Manifest</>
+          : sourceCount > 1 ? `Aggregated from ${sourceCount} Manifest markets for this pair` : 'Source: Manifest'}
+      </div>
     </>
   );
 }
