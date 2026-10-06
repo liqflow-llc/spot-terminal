@@ -1,4 +1,7 @@
 .market-header { display: flex; align-items: center; gap: 20px; height: 56px; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--border); flex-shrink: 0; overflow-x: auto; overflow-y: visible; }
+/* Still scrolls sideways on narrow screens, without a visible scrollbar under the prices. */
+.market-header { scrollbar-width: none; }
+.market-header::-webkit-scrollbar { display: none; }
 .selector { position: relative; flex-shrink: 0; }
 .selector-btn { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 10px; background: none; border: 1px solid transparent; border-radius: var(--radius); cursor: pointer; }
 .selector-btn:hover { background: var(--panel-2); border-color: var(--border-2); }
