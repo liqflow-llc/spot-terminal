@@ -173,6 +173,16 @@ function marketView(s, { withHiLo = false } = {}) {
 const MAX_ARCHER_PAIR_MARKETS = 3;
 const archerPairMarkets = (s) => archer.marketsForPair(s.baseMint, s.quoteMint).slice(0, MAX_ARCHER_PAIR_MARKETS);
 
+/** Archer trades for this pair, in the primary market's orientation, dust filtered. */
+function archerTradesFor(s, list, archerMarket) {
+    const inverted = archerMarket.baseMint !== s.baseMint;
+    const quoteUsd = registry.cachedPrice(s.quoteMint);
+    const minQuote = quoteUsd ? MIN_TRADE_USD / quoteUsd : 0;
+    return list.map(t => (inverted
+        ? { ...t, price: 1 / t.price, size: t.quote, quote: t.size, side: t.side === 'buy' ? 'sell' : 'buy' }
+        : t)).filter(t => t.price * t.size >= minQuote);
+}
+
 function bookFor(s, depth) {
     const quoteUsd = registry.cachedPrice(s.quoteMint);
     const extra = archerPairMarkets(s).map(m => ({ venue: 'archer', market: m.address, baseMint: m.baseMint, levels: archer.levels(m.address) }));
@@ -300,7 +310,12 @@ app.get('/api/markets/:address/risk', rateLimit('risk', 30, 60_000), async (req,
 
 app.get('/api/markets/:address/trades', (req, res) => {
     if (!requireMarket(req, res)) return;
-    res.json({ trades: trades.recentTrades(req.params.address, Math.min(200, Number(req.query.limit) || 60)) });
+    const limit = Math.min(200, Number(req.query.limit) || 60);
+    const s = markets.summary(req.params.address);
+    // Archer's recent trades for the pair, when someone is watching it (the stream is subscribed).
+    const archerTrades = archerPairMarkets(s).flatMap(m => archerTradesFor(s, archer.recentTrades(m.address), m));
+    const merged = [...trades.recentTrades(req.params.address, limit), ...archerTrades].sort((a, b) => b.time - a.time).slice(0, limit);
+    res.json({ trades: merged });
 });
 
 app.get('/api/markets/:address/candles', rateLimit('candles', 60, 60_000), async (req, res) => {
@@ -342,6 +357,13 @@ app.get('/api/stream', (req, res) => {
     };
     markets.on('update', onUpdate);
     archer.on('update', onUpdate);
+    const onArcherTrades = (a, list, isSnapshot) => {
+        const m = archer.markets.get(a);
+        if (!m || !archerMarkets.includes(a)) return;
+        const converted = archerTradesFor(s, list, m);
+        if (isSnapshot) send('trades', converted); else for (const t of converted) send('trade', t);
+    };
+    archer.on('trades', onArcherTrades);
     trades.on('trade', onTrade);
     pushBook();
     const ticker = setInterval(() => send('ticker', marketView(markets.summary(address), { withHiLo: true })), 5000);
@@ -352,6 +374,7 @@ app.get('/api/stream', (req, res) => {
         if (left > 0) streamsPerIp.set(ip, left); else streamsPerIp.delete(ip);
         markets.off('update', onUpdate);
         archer.off('update', onUpdate);
+        archer.off('trades', onArcherTrades);
         trades.off('trade', onTrade);
         clearTimeout(bookTimer);
         clearInterval(ticker);

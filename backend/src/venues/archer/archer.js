@@ -33,6 +33,7 @@ export class ArcherVenue extends EventEmitter {
         this.books = new Map();   // address -> { bids: Map<price string, size>, asks, seq, at }
         this.subs = new Map();    // address -> { refs, timer }
         this.activity = new Map(); // address -> { volume24h, lastPrice } from the mini_tickers feed
+        this.trades = new Map();   // address -> recent trades, newest first
         this.ws = null;
         this.reconnectDelay = 1000;
     }
@@ -110,7 +111,7 @@ export class ArcherVenue extends EventEmitter {
         let sub = this.subs.get(address);
         if (!sub) {
             this.subs.set(address, (sub = { refs: 0, timer: null }));
-            this.send({ op: 'subscribe', channels: ['orderbook'], market: address });
+            this.send({ op: 'subscribe', channels: ['orderbook', 'trades'], market: address });
         }
         clearTimeout(sub.timer);
         sub.timer = null;
@@ -124,7 +125,8 @@ export class ArcherVenue extends EventEmitter {
             sub.timer = setTimeout(() => {
                 this.subs.delete(address);
                 this.books.delete(address);
-                this.send({ op: 'unsubscribe', channels: ['orderbook'], market: address });
+                this.trades.delete(address);
+                this.send({ op: 'unsubscribe', channels: ['orderbook', 'trades'], market: address });
             }, UNSUBSCRIBE_GRACE_MS);
         };
     }
@@ -139,7 +141,7 @@ export class ArcherVenue extends EventEmitter {
             if (this.reconnectDelay > 1000) log.info('archer', 'stream_reconnected');
             this.reconnectDelay = 1000;
             this.send({ op: 'subscribe', channels: ['mini_tickers'] });
-            for (const address of this.subs.keys()) this.send({ op: 'subscribe', channels: ['orderbook'], market: address });
+            for (const address of this.subs.keys()) this.send({ op: 'subscribe', channels: ['orderbook', 'trades'], market: address });
             ping = setInterval(() => this.send({ op: 'ping', ts: Date.now() }), PING_MS);
         });
         ws.on('message', (raw) => {
@@ -150,6 +152,7 @@ export class ArcherVenue extends EventEmitter {
                 return;
             }
             if (msg.ch === 'orderbook') this.onBook(msg);
+            else if (msg.ch === 'trades') this.onTrades(msg);
             else if (msg.ch === 'mini_tickers') {
                 for (const [address, t] of Object.entries(msg.data || {})) {
                     this.activity.set(address, { volume24h: Number(t.volume24h) || 0, lastPrice: Number(t.lastPrice) || null });
@@ -175,6 +178,31 @@ export class ArcherVenue extends EventEmitter {
         if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
     }
 
+    /**
+     * Archer trades as { time, price, size, side, signature } in the market's own orientation
+     * (price in quote per base, size in base, side of the taker).
+     */
+    onTrades(msg) {
+        const address = msg.market;
+        const market = this.markets.get(address);
+        if (!market || !this.subs.has(address)) return;
+        const list = (Array.isArray(msg.data) ? msg.data : [msg.data]).filter(Boolean).map((t) => {
+            const inSize = Number(t.execInputSize), outSize = Number(t.execOutputSize);
+            if (!(inSize > 0) || !(outSize > 0)) return null;
+            const buy = t.inputMint === market.quoteMint; // paid quote, got base
+            const base = buy ? outSize : inSize, quote = buy ? inSize : outSize;
+            return { time: Number(t.timestamp) || Date.now(), price: quote / base, size: base, quote, side: buy ? 'buy' : 'sell', signature: t.txSignature, venue: 'archer' };
+        }).filter(Boolean);
+        if (!list.length) return;
+        const kept = msg.type === 'snapshot' ? list : [...list, ...(this.trades.get(address) || [])];
+        this.trades.set(address, kept.sort((a, b) => b.time - a.time).slice(0, 100));
+        this.emit('trades', address, list, msg.type === 'snapshot');
+    }
+
+    recentTrades(address) {
+        return this.trades.get(address) || [];
+    }
+
     onBook(msg) {
         const address = msg.market;
         if (!this.subs.has(address)) return;
@@ -191,8 +219,8 @@ export class ArcherVenue extends EventEmitter {
             if (msg.sequenceId != null && book.seq != null && msg.sequenceId > book.seq + 1) {
                 // Missed an update: drop the book and ask for a fresh snapshot.
                 this.books.delete(address);
-                this.send({ op: 'unsubscribe', channels: ['orderbook'], market: address });
-                this.send({ op: 'subscribe', channels: ['orderbook'], market: address });
+                this.send({ op: 'unsubscribe', channels: ['orderbook', 'trades'], market: address });
+                this.send({ op: 'subscribe', channels: ['orderbook', 'trades'], market: address });
                 return;
             }
             for (const [side, levels] of [[book.bids, msg.bids], [book.asks, msg.asks]]) {

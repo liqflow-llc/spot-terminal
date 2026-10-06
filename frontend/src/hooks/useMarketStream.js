@@ -31,7 +31,17 @@ export function useMarketStream(address) {
       es.addEventListener('trade', (e) => {
         const trade = JSON.parse(e.data);
         setTrades(ts => [trade, ...ts].slice(0, 120));
-        tradeListeners.current.forEach(fn => fn(trade));
+        // The chart is the Manifest market's own; Archer trades show in the list only.
+        if (trade.venue !== 'archer') tradeListeners.current.forEach(fn => fn(trade));
+      });
+      // A batch of recent Archer trades when its stream (re)connects: merge without duplicates.
+      es.addEventListener('trades', (e) => {
+        const batch = JSON.parse(e.data);
+        setTrades(ts => {
+          const seen = new Set(ts.map(t => `${t.signature}|${t.time}|${t.size}`));
+          return [...ts, ...batch.filter(t => !seen.has(`${t.signature}|${t.time}|${t.size}`))]
+            .sort((a, b) => b.time - a.time).slice(0, 120);
+        });
       });
     };
     const close = () => {

@@ -1,5 +1,6 @@
 import { formatAmount, formatPrice, formatTime, priceDecimals } from '../utils/format';
 import './Trades.css';
+import './OrderBook.css'; // venue badge style
 
 export default function Trades({ trades, market }) {
   const decimals = priceDecimals(market?.last ?? trades[0]?.price);
@@ -12,7 +13,10 @@ export default function Trades({ trades, market }) {
         {trades.map((t, i) => {
           const cells = (
             <>
-              <span className={`num ${t.side === 'buy' ? 'bid' : 'ask'}`}>{formatPrice(t.price, decimals)}</span>
+              <span className={`num ${t.side === 'buy' ? 'bid' : 'ask'}`}>
+                {formatPrice(t.price, decimals)}
+                {t.venue === 'archer' && <span className="venue-badge archer" title="Trade on Archer">A</span>}
+              </span>
               <span className="num">{formatAmount(t.size)}</span>
               <span className="num muted">{formatTime(t.time)}</span>
             </>
