@@ -385,7 +385,6 @@ app.post('/api/tx/submit', writeLimit, handle(body => orders.submit(body)));
 const NEW_MARKET_QUOTES = [
     { symbol: 'SOL', mint: 'So11111111111111111111111111111111111111112' },
     { symbol: 'USDC', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' },
-    { symbol: 'USDT', mint: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB' },
 ];
 
 /**

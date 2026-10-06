@@ -29,7 +29,7 @@ function useToken(mint) {
 }
 
 /**
- * Create a Manifest market for any token against SOL, USDC, USDT or any other token.
+ * Create a Manifest market for any token against SOL, USDC or any other token (by its mint).
  * Opened with both tokens chosen (e.g. "Create SKIRM/SOL"), it goes straight to the cost step.
  */
 export default function CreateMarketModal({ initialBase = '', initialQuote = null, onClose }) {
@@ -126,7 +126,7 @@ export default function CreateMarketModal({ initialBase = '', initialQuote = nul
 
           <span className="cm-label">Priced in (quote)</span>
           <div className="cm-quotes">
-            {(quotes.length ? quotes : [{ symbol: 'SOL' }, { symbol: 'USDC' }, { symbol: 'USDT' }]).map(q => (
+            {(quotes.length ? quotes : [{ symbol: 'SOL' }, { symbol: 'USDC' }]).map(q => (
               <button key={q.symbol} type="button" className={`cm-chip ${quoteChoice === q.symbol ? 'active' : ''}`} onClick={() => setQuoteChoice(q.symbol)}>
                 {q.symbol}{q.market ? <span className="cm-exists"> · exists</span> : null}
               </button>
