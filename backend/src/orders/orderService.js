@@ -25,9 +25,9 @@ import {
     OrderType, ataIx, batchUpdateIx, claimSeatIx, depositIx, encodePrice, isNativeMint,
     orderEconomics, quoteForBase, unwrapSolIx, withdrawIx, wrapSolIxs,
 } from '../venues/manifest/instructions.js';
-import { parseBatchUpdateReturn } from '../venues/manifest/fills.js';
 import { errorDetail, log, short } from '../log.js';
 import { claimReservations } from './orderStore.js';
+import { placedSequenceNumber } from './sequence.js';
 
 const PLACE_CU = 400_000;
 const CLAIM_CU = 120_000;
@@ -702,14 +702,15 @@ export class OrderService {
         if (replaced) this.store.update(replaced.id, { status: 'cancelled', replacedBy: order.id, cancelSignature: signature });
         if (pending.replenishNonce) this.store.addNonce(pending.replenishNonce, pending.wallet);
 
-        const tx = await connection.getTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
-        // The place transaction holds exactly one batch update placing one order.
-        const sequenceNumber = parseBatchUpdateReturn(tx?.meta?.logMessages)?.[0] ?? null;
-        if (!sequenceNumber) log.error('orders', 'no_sequence_number', { order: order.id, sig: signature, note: 'keeper will not auto-claim this order' });
+        // The place transaction holds exactly one batch update placing one order. If the RPC can't
+        // produce it yet, the keeper fills the sequence number in later (until then it won't pay out).
+        const placed = await placedSequenceNumber(signature);
+        const sequenceNumber = placed?.sequenceNumber ?? null;
+        if (!sequenceNumber) log.warn('orders', 'no_sequence_number_yet', { order: order.id, sig: signature, note: 'keeper will look it up' });
         this.store.update(order.id, {
             status: 'open',
             placeSignature: signature,
-            placeSlot: tx?.slot ?? null,
+            placeSlot: placed?.slot ?? null,
             sequenceNumber,
         });
         this.onPlaced?.(order.id);

@@ -8,6 +8,7 @@ import { Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import { connection } from '../solana.js';
 import { config } from '../config.js';
 import { claimReservations } from './orderStore.js';
+import { placedSequenceNumber } from './sequence.js';
 import { errorDetail, log, short } from '../log.js';
 
 const SWEEP_MS = 20_000;
@@ -33,6 +34,7 @@ export class Keeper extends EventEmitter {
         this.keypair = keypair;
         this.releases = new Map(); // market -> release fn for its live subscription
         this.inFlight = new Set();
+        this.backfilling = new Set(); // order ids whose sequence number is being looked up
     }
 
     start() {
@@ -68,6 +70,20 @@ export class Keeper extends EventEmitter {
         for (const m of marketsWithOrders) this.checkMarket(m);
     }
 
+    /** Find a placed order's missing sequence number (the RPC lagged when it was placed). */
+    backfillSequence(order) {
+        if (!order.placeSignature || this.backfilling.has(order.id)) return;
+        this.backfilling.add(order.id);
+        placedSequenceNumber(order.placeSignature, { tries: 1 }).then((placed) => {
+            if (!placed?.sequenceNumber) {
+                log.warn('keeper', 'sequence_still_missing', { order: order.id, sig: order.placeSignature });
+                return;
+            }
+            this.store.update(order.id, { sequenceNumber: placed.sequenceNumber, placeSlot: placed.slot });
+            log.info('keeper', 'sequence_backfilled', { order: order.id, sequenceNumber: placed.sequenceNumber });
+        }).finally(() => this.backfilling.delete(order.id));
+    }
+
     checkMarket(marketAddress) {
         const market = this.markets.get(marketAddress);
         if (!market) return;
@@ -78,8 +94,11 @@ export class Keeper extends EventEmitter {
             // Don't judge an order against market data older than the order itself.
             if (order.placeSlot && slot < order.placeSlot) continue;
             // Without a sequence number we can't tell whether the order is still resting, and the
-            // seat may hold other funds, so never claim blind; the user can withdraw manually.
-            if (!order.sequenceNumber) continue;
+            // seat may hold other funds, so never claim blind: look it up from the place transaction.
+            if (!order.sequenceNumber) {
+                this.backfillSequence(order);
+                continue;
+            }
             // Judged by slot, not by the book: an unchanged market account is never re-parsed, so the
             // cached book can still list an order after its expiry slot.
             const expired = order.lastValidSlot && slot > order.lastValidSlot;

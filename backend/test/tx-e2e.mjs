@@ -315,6 +315,16 @@ await test('Order fills before its edit is approved: clear message, nothing chan
     assert.equal(store.get(order.id).status, 'claimed');
 });
 
+await test('The RPC lags right after an order is placed (no sequence number yet): the keeper looks it up and still pays out', async () => {
+    const order = await placeOrder({ market: mBQ, side: 'sell', price: '2', size: '2' });
+    const seq = order.sequenceNumber;
+    assert.ok(seq, 'normally known straight away');
+    store.update(order.id, { sequenceNumber: null }); // what a lagging RPC left us with
+    await waitFor(() => store.get(order.id).sequenceNumber === seq, 'keeper backfills the sequence number');
+    await takerBuys(mBQ, 5_000_000n);
+    await waitFor(() => store.get(order.id).status === 'claimed', 'keeper pays out');
+});
+
 // ---------- money and capacity ----------
 
 await test('Not enough SOL for the setup: a clear message', async () => {
