@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import { config } from '../config.js';
 import { log } from '../log.js';
+import { iconUrl } from './ipfsIcons.js';
 
 const JUP_API = 'https://api.jup.ag';
 const CACHE_FILE = path.join(config.dataDir, 'token-cache.json');
@@ -107,7 +108,8 @@ export class TokenRegistry {
             symbol: t?.symbol || shortMint(mint),
             name: t?.name || '',
             decimals: t ? t.decimals : null,
-            icon: t?.icon || null,
+            // IPFS icons on public gateways are served through our own cache (tokens/ipfsIcons.js).
+            icon: t?.icon ? iconUrl(t.icon) : null,
             verified: !!t?.verified,
             kind: t?.kind || null,
             usdPrice: price,

@@ -22,6 +22,7 @@ import { errorDetail, log, short, takeProblemCounts } from './log.js';
 import { takeRpcStats } from './rpcStats.js';
 import { startLogRotation } from './logRotate.js';
 import { Notifier } from './notify.js';
+import { getIpfsIcon } from './tokens/ipfsIcons.js';
 
 const registry = new TokenRegistry({ heliusRpc: config.rpcUrl, jupApiKey: config.jupApiKey });
 registry.startBackgroundRefresh();
@@ -702,6 +703,20 @@ app.post('/api/client-log', rateLimit('client-log', 20, 60_000), (req, res) => {
         where: clip(b.where, 80), ua: clip(req.headers['user-agent'], 80),
     });
     res.status(204).end();
+});
+
+// Token icons stored on IPFS, fetched once from a working gateway and cached (tokens/ipfsIcons.js).
+app.get(/^\/api\/ipfs\/(.+)$/, rateLimit('icons', 600, 60_000), async (req, res) => {
+    const icon = await getIpfsIcon(req.params[0]).catch(() => null);
+    if (!icon) return res.status(404).set('Cache-Control', 'public, max-age=600').end();
+    res.set({
+        'Content-Type': icon.type,
+        'Cache-Control': 'public, max-age=31536000, immutable',
+        'X-Content-Type-Options': 'nosniff',
+        // Third-party files on our origin: an SVG opened directly must not run scripts here.
+        'Content-Security-Policy': "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox",
+    });
+    res.sendFile(icon.file);
 });
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));

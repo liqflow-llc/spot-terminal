@@ -85,8 +85,9 @@ export default function Privacy() {
             attacks, and provides Cloudflare Web Analytics (cookieless page-view counts).</li>
           <li><strong>Plausible Analytics</strong> &mdash; cookieless, aggregate visit statistics. It
             does not store IP addresses or build profiles.</li>
-          <li><strong>Token icon hosts</strong> &mdash; token logos load directly from wherever each
-            token&apos;s creator hosts them, which sees your IP address (no referrer is sent).</li>
+          <li><strong>Token icon hosts</strong> &mdash; most token logos load directly from wherever each
+            token&apos;s creator hosts them, which sees your IP address (no referrer is sent). Logos
+            stored on IPFS are fetched and cached by the Service and served from this site instead.</li>
           <li><strong>Helius</strong> &mdash; the Solana RPC provider the server uses; it receives the
             wallet addresses and transactions the server looks up or sends for you.</li>
           <li><strong>The Solana network</strong> &mdash; every transaction you sign is public,
