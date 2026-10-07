@@ -487,6 +487,7 @@ app.post('/api/push/status', rateLimit('account', 40, 60_000), handle(async ({ w
 const quoteLimit = rateLimit('quote', 40, 60_000);
 app.post('/api/swap/quote', quoteLimit, handle(async body => (await orders.quoteSwap(body)).summary));
 app.post('/api/swap/prepare', writeLimit, handle(body => orders.prepareSwap(body)));
+app.post('/api/payout-accounts/setup', writeLimit, handle(body => orders.prepareSetup(body)));
 app.post('/api/payout-accounts/close', writeLimit, handle(body => orders.prepareClosePayout(body)));
 app.post('/api/tx/submit', writeLimit, handle(body => orders.submit(body)));
 // A token by mint, with its markets against the quotes we offer for new markets.

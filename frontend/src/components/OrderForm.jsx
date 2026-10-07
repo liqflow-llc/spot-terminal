@@ -184,8 +184,12 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
         const ok = await new Promise(resolve => setSetupPrompt({ resolve, summary: prepared.summary }));
         setSetupPrompt(null);
         if (!ok) return;
+        // Built now rather than before the dialog: a transaction expires about a minute after it's
+        // prepared, and reading the dialog shouldn't use that time up.
+        setBusy('Preparing…');
+        const setupTx = await postJSON('/api/payout-accounts/setup', { wallet: publicKey.toBase58() });
         setBusy('Approve setup in your wallet…');
-        const setup = await signAndSubmit(prepared, signAllTransactions);
+        const setup = await signAndSubmit(setupTx, signAllTransactions);
         toast({ kind: 'success', title: 'Instant payouts enabled', link: explorerTx(setup.signature) });
         setBusy('Preparing…');
         prepared = await prepare(true); // any price warning was already confirmed above

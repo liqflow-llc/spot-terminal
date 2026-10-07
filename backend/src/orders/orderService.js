@@ -265,6 +265,11 @@ export class OrderService {
 
     // ---------- nonce setup ----------
 
+    /** The payout-account setup on its own, built when the user agrees to it (a fresh blockhash). */
+    async prepareSetup({ wallet }) {
+        return this.prepareNonceSetup(parseWallet(wallet));
+    }
+
     async prepareNonceSetup(walletPk) {
         const rent = await connection.getMinimumBalanceForRentExemption(NONCE_ACCOUNT_LENGTH);
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
@@ -512,8 +517,18 @@ export class OrderService {
     }
 
     async send(tx, { blockhash, lastValidBlockHeight }) {
-        const signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
-        const res = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+        let signature, res;
+        try {
+            signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
+            res = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+        } catch (err) {
+            // A transaction is only valid for ~60-90 s after it was prepared; approving it in the
+            // wallet took longer than that. Nothing happened on chain.
+            if (/blockhash not found|block height exceeded|has expired/i.test(err?.message || '')) {
+                throw new UserError('This took too long to approve and expired, so nothing was sent. Please try again.');
+            }
+            throw err;
+        }
         if (res.value.err) throw new UserError(`Transaction failed: ${JSON.stringify(res.value.err)}`);
         return signature;
     }
@@ -536,7 +551,10 @@ export class OrderService {
             return result;
         } catch (err) {
             if (pending) {
-                const fields = { wallet: short(pending.wallet), ...describePending(pending), msg: errorDetail(err), ms: Date.now() - started };
+                const fields = {
+                    wallet: short(pending.wallet), ...describePending(pending), msg: errorDetail(err), ms: Date.now() - started,
+                    ageS: pending.createdAt ? Math.round((started - pending.createdAt) / 1000) : undefined, // prepare -> signed
+                };
                 if (err instanceof UserError) log.warn('orders', `${pending.kind}_failed`, fields);
                 else log.error('orders', `${pending.kind}_failed`, fields);
             }
@@ -669,6 +687,9 @@ export class OrderService {
         const limit = Number(price);
         if (!(limit > 0)) throw new UserError('Enter a price above zero');
         if (!this.jupiter) return this.prepareOrder(params);
+        // A wallet without free payout accounts needs the setup first: say so before any Jupiter calls.
+        const spoken = this.noncesSpokenFor(walletPk.toBase58());
+        if (!this.store.noncesFor(walletPk.toBase58()).some(a => !spoken.has(a))) return this.prepareNonceSetup(walletPk);
         const s = this.markets.summary(market);
         if (!s) throw new UserError('Unknown market');
         await this.checkPriceRisk(market, side, limit, acknowledgePriceRisk);
