@@ -19,3 +19,18 @@
 .venue-badge { display: inline-block; margin-left: 4px; padding: 0 3px; border-radius: 3px; font-size: 9px; font-weight: 700; line-height: 13px; vertical-align: 1px; font-family: var(--font); }
 .venue-badge.archer { background: var(--archer-bg); color: var(--archer); }
 .ob-foot { line-height: 1.35; height: 42px; box-sizing: border-box; overflow: hidden; flex-shrink: 0; }
+
+/* "Message the traders at this price": a small icon on the row's left edge, only on hover. */
+.ob-row-wrap { position: relative; flex-shrink: 0; }
+.ob-msg { position: absolute; left: 0; top: 0; width: 12px; height: 20px; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; background: none; color: var(--muted); cursor: pointer; opacity: 0; transition: opacity .12s; }
+.ob-row-wrap:hover .ob-msg, .ob-msg:focus-visible { opacity: 1; }
+.ob-msg:hover { color: var(--accent); }
+@media (hover: none) { .ob-msg { display: none; } }
+
+.ob-traders { position: fixed; z-index: 60; width: 250px; padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 8px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); font-size: 12px; }
+.ob-traders-title { font-weight: 600; margin-bottom: 6px; }
+.ob-traders ul { list-style: none; margin: 0; padding: 0; max-height: 180px; overflow-y: auto; }
+.ob-traders li { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 3px 0; }
+.ob-traders li .num { text-align: right; }
+.ob-traders a { font-weight: 600; }
+.ob-traders-note { color: var(--muted); font-size: 11px; margin-top: 6px; }

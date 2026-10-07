@@ -138,6 +138,14 @@ try {
     await page.waitForFunction(() => [...document.querySelectorAll('.ob-row.ask')].some(r => r.textContent.includes('2.50')), { timeout: 15000 });
     await shot('1-order-open');
 
+    step('The order book row lists the wallet behind it (W2W Chat message links; your own order says "you")');
+    await page.evaluate(() => [...document.querySelectorAll('.ob-row-wrap')].find(w => w.querySelector('.ob-row.ask')?.textContent.includes('2.50')).querySelector('.ob-msg').click());
+    await page.waitForFunction((w) => document.querySelector('.ob-traders li')?.textContent.includes(`${w.slice(0, 4)}…${w.slice(-4)}`), { timeout: 10000 }, user.publicKey.toBase58());
+    const card = await page.$eval('.ob-traders', el => ({ text: el.textContent, links: el.querySelectorAll('li a').length }));
+    if (!card.text.includes('you') || card.links !== 0) throw new Error(`own order should say "you" with no message link: ${card.text}`);
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('.ob-traders'), { timeout: 5000 });
+
     step('A taker fills the whole order');
     const [baseVault] = PublicKey.findProgramAddressSync([Buffer.from('vault'), new PublicKey(market).toBuffer(), BASE.toBuffer()], new PublicKey('MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms'));
     const [quoteVault] = PublicKey.findProgramAddressSync([Buffer.from('vault'), new PublicKey(market).toBuffer(), QUOTE.toBuffer()], new PublicKey('MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms'));

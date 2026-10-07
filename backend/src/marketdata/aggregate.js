@@ -64,3 +64,36 @@ export function aggregateBook(markets, primary, depth = 60, minQuote = 0, extra 
         time: Date.now(),
     };
 }
+
+/**
+ * The individual Manifest orders behind one row of the merged book: `side` ('ask' | 'bid') orders
+ * priced within [lo, hi] (quote per base of `primary`), across the same pair markets the book
+ * merges, flipped markets converted the same way. Archer only publishes price levels, so it has
+ * none to list. For "message this trader" links. Sorted best price first, at most `limit`.
+ */
+export function ordersAt(markets, primary, side, lo, hi, limit = 20) {
+    const pair = markets.marketsForPair(primary.baseMint, primary.quoteMint).slice(0, MAX_PAIR_MARKETS);
+    if (!pair.some(m => m.address === primary.address)) pair.unshift(primary);
+    const eps = 1e-9;
+    const out = [];
+    for (const m of pair) {
+        const market = markets.get(m.address);
+        if (!market) continue;
+        const inverted = m.baseMint !== primary.baseMint;
+        // A bid for our quote token (paid in our base token) is an ask on our book, and vice versa.
+        const list = (side === 'ask') !== inverted ? market.asks() : market.bids();
+        for (const o of list) {
+            const price = inverted ? 1 / o.tokenPrice : o.tokenPrice;
+            if (!(price >= lo * (1 - eps) && price <= hi * (1 + eps))) continue;
+            out.push({
+                trader: o.trader.toBase58(),
+                price,
+                size: inverted ? o.numBaseTokens * o.tokenPrice : o.numBaseTokens,
+                market: m.address,
+            });
+        }
+    }
+    out.sort((a, b) => (side === 'ask' ? a.price - b.price : b.price - a.price));
+    return out.slice(0, limit);
+}
+

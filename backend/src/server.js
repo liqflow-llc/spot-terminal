@@ -15,7 +15,7 @@ import { OrderService, UserError } from './orders/orderService.js';
 import { Keeper, loadKeeperKeypair } from './orders/keeper.js';
 import { Ledger } from './orders/ledger.js';
 import { TAX_APPS, buildRows, exportCsv } from './tax/exports.js';
-import { aggregateBook } from './marketdata/aggregate.js';
+import { aggregateBook, ordersAt } from './marketdata/aggregate.js';
 import { GeckoStats } from './marketdata/geckoStats.js';
 import { AmmChart } from './marketdata/ammChart.js';
 import { errorDetail, log, short, takeProblemCounts } from './log.js';
@@ -376,6 +376,18 @@ app.get('/api/markets/:address/amm-candles', rateLimit('candles', 60, 60_000), a
         log.warn('amm-chart', 'candles_failed', { market: short(req.params.address), msg: err.message });
         res.status(502).json({ error: 'Market data provider unavailable, try again shortly.' });
     }
+});
+
+// The Manifest orders behind one order-book row (price range [lo, hi]), with their traders'
+// wallets: the order book's "message this trader" links (W2W Chat). All of it is public on chain.
+app.get('/api/markets/:address/orders-at', rateLimit('orders-at', 60, 60_000), (req, res) => {
+    const s = requireMarket(req, res);
+    if (!s) return;
+    const side = req.query.side === 'bid' ? 'bid' : req.query.side === 'ask' ? 'ask' : null;
+    const lo = Number(req.query.lo), hi = Number(req.query.hi);
+    if (!side || !(lo > 0) || !(hi >= lo)) return res.status(400).json({ error: 'side, lo and hi are required' });
+    res.set('Cache-Control', 'no-cache');
+    res.json({ orders: ordersAt(markets, s, side, lo, hi) });
 });
 
 app.get('/api/markets/:address/candles', rateLimit('candles', 60, 60_000), async (req, res) => {
