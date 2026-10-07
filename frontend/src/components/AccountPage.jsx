@@ -15,6 +15,15 @@ import { useTheme } from '../theme';
 
 const sol = (n) => `${Number(n || 0).toFixed(5)} SOL`;
 
+// One CSV per tax app, each in the format that app documents for custom imports.
+const TAX_APPS = [
+  { id: 'koinly', name: 'Koinly', howto: 'Add a new wallet named SpotBook (pick the custom / other option if asked), then use Import from file and upload the Koinly CSV. Koinly matches its deposits and withdrawals with your imported Solana wallet by transaction ID, and the token columns include each mint address so the right token is picked.' },
+  { id: 'cointracker', name: 'CoinTracker', howto: 'Go to Wallets → Add wallets, search for CSV, and upload the CoinTracker CSV as a wallet named SpotBook. CoinTracker pairs its sends and receives with your Solana wallet as transfers.' },
+  { id: 'coinledger', name: 'CoinLedger', howto: 'Upload the CoinLedger CSV under Import → Other Account (the universal manual import), then use Edit Name to call it SpotBook. Deposits and withdrawals are self-transfers there.' },
+  { id: 'awaken', name: 'Awaken', howto: 'Add a new account using CSV upload and upload the Awaken CSV. With your Solana wallet also imported, Awaken matches the transfers between the two accounts. Amounts are limited to 8 decimal places, so dust below that is left out.' },
+  { id: 'cointracking', name: 'CoinTracking', howto: 'Use the bulk import (Enter Coins → Import). The file follows the bulk-import column order with Trade, Deposit and Withdrawal types and SpotBook as the exchange. If it only accepts its Excel template, paste these rows into the template.' },
+];
+
 export default function AccountPage() {
   const { publicKey, signAllTransactions } = useWallet();
   const wallet = publicKey?.toBase58() || null;
@@ -62,6 +71,12 @@ export default function AccountPage() {
   const ordersText = `${openOrders} open order${openOrders === 1 ? '' : 's'}`;
   const push = usePushNotifications(wallet);
   const { pref: themePref, setPref: setThemePref } = useTheme();
+  const [tax, setTax] = useState(null); // { entries, years }
+  const [taxYear, setTaxYear] = useState('');
+  useEffect(() => {
+    if (!wallet) return setTax(null);
+    getJSON(`/api/tax/summary?wallet=${wallet}`).then(setTax).catch(() => setTax(null));
+  }, [wallet, payout]);
 
   return (
     <div className="app account-page">
@@ -122,6 +137,58 @@ export default function AccountPage() {
             ))}
           </div>
           <p className="muted small">System follows your device&apos;s light or dark setting. Saved in this browser.</p>
+        </section>
+
+        <section className="account-card">
+          <h2>Tax reports</h2>
+          <p className="muted">
+            Your SpotBook activity as a CSV file for your tax app. Import your Solana wallet in the app as usual,
+            then add this file as a separate account named SpotBook. Money moving into and out of SpotBook keeps
+            your wallet&apos;s transaction IDs, so the app pairs it as transfers between your own accounts, and each
+            limit order fill is a trade at your order&apos;s price.
+          </p>
+          {!wallet ? (
+            <div className="account-row">Connect your wallet to download your reports.</div>
+          ) : !tax ? (
+            <div className="account-row"><span className="spinner" /> Loading…</div>
+          ) : tax.entries === 0 ? (
+            <div className="account-row">No SpotBook activity yet.</div>
+          ) : (
+            <>
+              <label className="account-row tax-year">
+                Period
+                <select value={taxYear} onChange={e => setTaxYear(e.target.value)}>
+                  <option value="">All time</option>
+                  {tax.years.map(y => <option key={y} value={y}>{y}</option>)}
+                </select>
+              </label>
+              <div className="tax-apps">
+                {TAX_APPS.map(a => (
+                  <a
+                    key={a.id}
+                    className="btn"
+                    href={`/api/tax/export?wallet=${wallet}&app=${a.id}${taxYear ? `&year=${taxYear}` : ''}`}
+                    download
+                  >
+                    {a.name} CSV
+                  </a>
+                ))}
+              </div>
+              <div className="tax-howto">
+                {TAX_APPS.map(a => (
+                  <details key={a.id}>
+                    <summary>How to import into {a.name}</summary>
+                    <p>{a.howto}</p>
+                  </details>
+                ))}
+              </div>
+              <p className="muted small">
+                Market orders and instant fills through Jupiter, and network fees, are ordinary transactions in your
+                wallet, so they come in with your wallet import, not this file. Import each period once: re-importing
+                the same rows can create duplicates in some apps.
+              </p>
+            </>
+          )}
         </section>
 
         <section className="account-card">

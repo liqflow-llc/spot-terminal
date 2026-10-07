@@ -27,7 +27,8 @@ import {
 } from '../venues/manifest/instructions.js';
 import { errorDetail, log, short } from '../log.js';
 import { claimReservations } from './orderStore.js';
-import { placedSequenceNumber } from './sequence.js';
+import { placedSequenceNumber, takerFill } from './sequence.js';
+import { SOL_MINT, recordFill } from './ledger.js';
 
 const PLACE_CU = 400_000;
 const CLAIM_CU = 120_000;
@@ -203,7 +204,8 @@ function parseMint(mint) {
 }
 
 export class OrderService {
-    constructor({ markets, store, keeperPubkey, referencePrice = null, jupiter = null, usdPrices = null }) {
+    constructor({ markets, store, keeperPubkey, referencePrice = null, jupiter = null, usdPrices = null, ledger = null }) {
+        this.ledger = ledger; // what moved into / out of SpotBook, for tax exports (orders/ledger.js)
         this.markets = markets;
         this.usdPrices = usdPrices; // async (mints) => { mint: usd } (to value transaction fees)
         this.jupiter = jupiter; // (pathAndQuery, { method, body }) => Promise<json>, rate limited
@@ -243,6 +245,24 @@ export class OrderService {
         }
         if (freed) log.info('orders', 'superseded_unsigned', { wallet: short(wallet) });
         return freed;
+    }
+
+    // ---------- ledger (tax exports) ----------
+
+    /** How much of an order has filled so far, from the book (null if we can't tell). */
+    filledSoFar(order) {
+        if (!order?.sequenceNumber) return null;
+        const resting = this.markets.allOrders(order.market).find(o => o.sequenceNumber.toString() === order.sequenceNumber);
+        return BigInt(order.baseAtoms) - (resting ? BigInt(resting.numBaseAtoms.toString()) : 0n);
+    }
+
+    /** Record a landed transaction's fills (first) and its moves between the wallet and SpotBook. */
+    recordLanded({ kind, wallet, sig, moves = [], fills = [], market = null, orderId = null }) {
+        for (const f of fills) {
+            const order = this.store.get(f.orderId);
+            if (order && f.filledAtoms != null) recordFill({ ledger: this.ledger, store: this.store, order, filledAtoms: f.filledAtoms });
+        }
+        this.ledger?.add({ key: `${kind}:${sig}`, wallet, kind, sig, market, orderId, moves });
     }
 
     // ---------- context ----------
@@ -334,6 +354,7 @@ export class OrderService {
             kind: 'setup', wallet: walletPk.toBase58(), createdAt: Date.now(),
             messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight,
             nonceAddresses: keypairs.map(k => k.publicKey.toBase58()),
+            moves: [{ mint: SOL_MINT, atoms: rent * NONCES_PER_SETUP, dir: 'in' }], // refundable rent
         });
         return {
             step: 'setup',
@@ -418,10 +439,11 @@ export class OrderService {
         if (isNativeMint(ctx.baseMint) || isNativeMint(ctx.quoteMint)) place.add(unwrapSolIx({ owner: walletPk }));
 
         // Keep one spare nonce ready so the next order is a single prompt too.
-        let replenish = null;
+        let replenish = null, replenishRent = 0;
         if (ctx.freeNonces.length === 1) {
             replenish = Keypair.generate();
             const rent = await connection.getMinimumBalanceForRentExemption(NONCE_ACCOUNT_LENGTH);
+            replenishRent = rent;
             place.add(...SystemProgram.createNonceAccount({
                 fromPubkey: walletPk, noncePubkey: replenish.publicKey, authorizedPubkey: walletPk, lamports: rent,
             }).instructions);
@@ -467,6 +489,7 @@ export class OrderService {
             messages: [place.serializeMessage(), claim.serializeMessage()],
             blockhash, lastValidBlockHeight,
             replenishNonce: replenish?.publicKey.toBase58() || null,
+            moves: [{ mint: lockMint, atoms: depositAtoms, dir: 'in' }, { mint: SOL_MINT, atoms: replenishRent, dir: 'in' }],
         });
         return {
             step: 'sign',
@@ -615,6 +638,7 @@ export class OrderService {
         if (pending.kind === 'setup') {
             const signature = await this.send(txs[0], pending);
             pending.nonceAddresses.forEach(a => this.store.addNonce(a, pending.wallet));
+            this.recordLanded({ kind: 'setup', wallet: pending.wallet, sig: signature, moves: pending.moves });
             return { ok: true, signature };
         }
 
@@ -634,6 +658,7 @@ export class OrderService {
             if (pending.nonceAddresses.some(a => busy.has(a))) throw new UserError('An order started using these payout accounts, please try the refund again.');
             const signature = await this.send(txs[0], pending);
             pending.nonceAddresses.forEach(a => this.store.removeNonce(a));
+            this.recordLanded({ kind: 'closePayout', wallet: pending.wallet, sig: signature, moves: [{ mint: SOL_MINT, atoms: pending.refundLamports, dir: 'out' }] });
             return { ok: true, signature, refundedSol: pending.refundLamports / 1e9 };
         }
 
@@ -643,6 +668,7 @@ export class OrderService {
             // Cancels first, in order; a failure stops here, before any payout account is closed.
             for (let i = 0; i < pending.cancels.length; i++) {
                 signature = await this.send(txs[i], pending);
+                this.recordLanded({ kind: 'cancelAll', wallet: pending.wallet, sig: signature, ...pending.cancelLedger[i] });
                 for (const orderId of pending.cancels[i]) this.store.update(orderId, { status: 'cancelled', cancelSignature: signature });
                 cancelled += pending.cancels[i].length;
             }
@@ -653,18 +679,21 @@ export class OrderService {
                 }
                 signature = await this.send(closeTx, pending);
                 pending.nonceAddresses.forEach(a => this.store.removeNonce(a));
+                this.recordLanded({ kind: 'closeAccount', wallet: pending.wallet, sig: signature, moves: [{ mint: SOL_MINT, atoms: pending.refundLamports, dir: 'out' }] });
             }
             return { ok: true, signature, cancelled, refundedSol: pending.refundLamports / 1e9 };
         }
 
         if (pending.kind === 'cancelAll') {
             const signature = await this.send(txs[0], pending);
+            this.recordLanded({ kind: 'cancelAll', wallet: pending.wallet, sig: signature, moves: pending.moves, fills: pending.fills, market: pending.market });
             for (const orderId of pending.orderIds) this.store.update(orderId, { status: 'cancelled', cancelSignature: signature });
             return { ok: true, signature, cancelled: pending.orderIds.length };
         }
 
         if (pending.kind === 'cancel' || pending.kind === 'withdraw') {
             const signature = await this.send(txs[0], pending);
+            this.recordLanded({ kind: pending.kind, wallet: pending.wallet, sig: signature, moves: pending.moves, fills: pending.fills, market: pending.market, orderId: pending.orderId });
             if (pending.orderId) this.store.update(pending.orderId, { status: 'cancelled', cancelSignature: signature });
             return { ok: true, signature };
         }
@@ -722,6 +751,7 @@ export class OrderService {
         }
         if (replaced) this.store.update(replaced.id, { status: 'cancelled', replacedBy: order.id, cancelSignature: signature });
         if (pending.replenishNonce) this.store.addNonce(pending.replenishNonce, pending.wallet);
+        this.recordLanded({ kind: replaced ? 'edit' : 'place', wallet: pending.wallet, sig: signature, moves: pending.moves, fills: pending.fills, market: order.market, orderId: order.id });
 
         // The place transaction holds exactly one batch update placing one order. If the RPC can't
         // produce it yet, the keeper fills the sequence number in later (until then it won't pay out).
@@ -734,6 +764,9 @@ export class OrderService {
             placeSlot: placed?.slot ?? null,
             sequenceNumber,
         });
+        // Matched resting orders on arrival: that part filled at their prices, not this order's.
+        const taken = takerFill(placed, order);
+        if (taken) recordFill({ ledger: this.ledger, store: this.store, order: this.store.get(order.id), filledAtoms: taken.baseAtoms, quoteAtoms: taken.quoteAtoms });
         this.onPlaced?.(order.id);
         return { ok: true, signature, orderId: order.id, sequenceNumber };
     }
@@ -830,6 +863,7 @@ export class OrderService {
             order: orderPending?.order || null,
             blockhash: orderPending?.blockhash, lastValidBlockHeight: orderPending?.lastValidBlockHeight,
             replenishNonce: orderPending?.replenishNonce || null,
+            moves: orderPending?.moves || [],
         });
         return {
             step: 'sign',
@@ -1156,9 +1190,12 @@ export class OrderService {
                 globals: ctx.globals, cancel: [order.sequenceNumber],
             }));
         }
-        await this.appendWithdrawAll(tx, walletPk, ctx, { excludeOrderId: order.id });
+        const withdrawn = await this.appendWithdrawAll(tx, walletPk, ctx, { excludeOrderId: order.id });
         const id = crypto.randomUUID();
-        this.pending.set(id, { kind: 'cancel', orderId, market: order.market, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight });
+        this.pending.set(id, {
+            kind: 'cancel', orderId, market: order.market, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight,
+            moves: withdrawMoves(ctx, withdrawn), fills: [{ orderId, filledAtoms: this.filledSoFar(order) }],
+        });
         return { step: 'sign', id, transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')], summary: { title: 'Cancel order', detail: 'Cancels the order and returns its funds to your wallet.' } };
     }
 
@@ -1265,6 +1302,12 @@ export class OrderService {
             kind: 'order', wallet: order.wallet, createdAt: Date.now(), order, replaces: old.id,
             messages: [tx.serializeMessage(), claim.serializeMessage()],
             blockhash, lastValidBlockHeight, replenishNonce: null,
+            moves: [
+                { mint: lockMint, atoms: depositAtoms, dir: 'in' },
+                { mint: lockMint, atoms: surplus, dir: 'out' },
+                { mint: proceedsMint, atoms: oldProceeds, dir: 'out' },
+            ],
+            fills: [{ orderId: old.id, filledAtoms: filled }],
         });
         return {
             step: 'sign',
@@ -1282,11 +1325,11 @@ export class OrderService {
         if (!all.length) throw new UserError('No open orders on this market');
         const batch = all.slice(0, CANCEL_ALL_MAX); // transaction size limit; the rest on a second click
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
-        const tx = await this.buildCancelTx(walletPk, market, batch, { blockhash, lastValidBlockHeight });
+        const { tx, moves, fills } = await this.buildCancelTx(walletPk, market, batch, { blockhash, lastValidBlockHeight });
         const id = crypto.randomUUID();
         this.pending.set(id, {
             kind: 'cancelAll', orderIds: batch.map(o => o.id), market, wallet: walletPk.toBase58(), createdAt: Date.now(),
-            messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight,
+            messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight, moves, fills,
         });
         return {
             step: 'sign', id,
@@ -1314,8 +1357,8 @@ export class OrderService {
                 globals: ctx.globals, cancel: seqs,
             }));
         }
-        await this.appendWithdrawAll(tx, walletPk, ctx, { excludeOrderId: new Set(batch.map(o => o.id)) });
-        return tx;
+        const withdrawn = await this.appendWithdrawAll(tx, walletPk, ctx, { excludeOrderId: new Set(batch.map(o => o.id)) });
+        return { tx, moves: withdrawMoves(ctx, withdrawn), fills: batch.map(o => ({ orderId: o.id, filledAtoms: this.filledSoFar(o) })) };
     }
 
     /**
@@ -1344,7 +1387,7 @@ export class OrderService {
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
         const cancels = [];
         for (const [market, list] of byMarket) {
-            cancels.push({ tx: await this.buildCancelTx(walletPk, market, list, { blockhash, lastValidBlockHeight }), orderIds: list.map(o => o.id) });
+            cancels.push({ ...(await this.buildCancelTx(walletPk, market, list, { blockhash, lastValidBlockHeight })), orderIds: list.map(o => o.id), market });
         }
         const txs = cancels.map(c => c.tx);
         let refundLamports = 0;
@@ -1364,6 +1407,7 @@ export class OrderService {
             kind: 'closeAccount', wallet: w, createdAt: Date.now(),
             messages: txs.map(t => t.serializeMessage()), blockhash, lastValidBlockHeight,
             cancels: cancels.map(c => c.orderIds), nonceAddresses: accounts.map(a => a.address), refundLamports,
+            cancelLedger: cancels.map(c => ({ moves: c.moves, fills: c.fills, market: c.market })),
         });
         return {
             step: 'sign', id,
@@ -1383,10 +1427,10 @@ export class OrderService {
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
         const tx = new Transaction({ feePayer: walletPk, blockhash, lastValidBlockHeight });
         tx.add(...priorityIxs(CANCEL_CU));
-        const added = await this.appendWithdrawAll(tx, walletPk, ctx);
-        if (!added) throw new UserError('Nothing to withdraw on this market');
+        const withdrawn = await this.appendWithdrawAll(tx, walletPk, ctx);
+        if (!withdrawn) throw new UserError('Nothing to withdraw on this market');
         const id = crypto.randomUUID();
-        this.pending.set(id, { kind: 'withdraw', market, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight });
+        this.pending.set(id, { kind: 'withdraw', market, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight, moves: withdrawMoves(ctx, withdrawn) });
         return { step: 'sign', id, transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')], summary: { title: 'Withdraw to wallet', detail: 'Moves your filled proceeds and leftovers back to your wallet.' } };
     }
 
@@ -1408,20 +1452,26 @@ export class OrderService {
                 market = Market.loadFromBuffer({ address: new PublicKey(ctx.marketAddress), buffer: Buffer.from(acct.data[0], 'base64'), slot: sim.context.slot });
             }
         }
-        if (!market.hasSeat(walletPk)) return false;
+        if (!market.hasSeat(walletPk)) return null;
         // Leave behind what other open orders' pre-signed claims will need, or they'd come up short.
         const reserved = claimReservations(this.store, walletPk.toBase58(), ctx.marketAddress, market, excludeOrderId);
         const sub = (a, b) => (a > b ? a - b : 0n);
         const base = sub(BigInt(market.getWithdrawableBalanceAtoms(walletPk, true).toString()), reserved.base);
         const quote = sub(BigInt(market.getWithdrawableBalanceAtoms(walletPk, false).toString()), reserved.quote);
-        if (base === 0n && quote === 0n) return false;
+        if (base === 0n && quote === 0n) return null;
         tx.add(ataIx({ payer: walletPk, owner: walletPk, mint: ctx.baseMint, tokenProgram: ctx.baseTokenProgram }));
         tx.add(ataIx({ payer: walletPk, owner: walletPk, mint: ctx.quoteMint, tokenProgram: ctx.quoteTokenProgram }));
         if (base > 0n) tx.add(withdrawIx({ trader: walletPk, market: ctx.marketAddress, mint: ctx.baseMint, tokenProgram: ctx.baseTokenProgram, amountAtoms: base }));
         if (quote > 0n) tx.add(withdrawIx({ trader: walletPk, market: ctx.marketAddress, mint: ctx.quoteMint, tokenProgram: ctx.quoteTokenProgram, amountAtoms: quote }));
         if (isNativeMint(ctx.baseMint) || isNativeMint(ctx.quoteMint)) tx.add(unwrapSolIx({ owner: walletPk }));
-        return true;
+        return { base, quote };
     }
+}
+
+/** A withdraw-all's amounts as ledger moves out of SpotBook. */
+function withdrawMoves(ctx, withdrawn) {
+    if (!withdrawn) return [];
+    return [{ mint: ctx.baseMint, atoms: withdrawn.base, dir: 'out' }, { mint: ctx.quoteMint, atoms: withdrawn.quote, dir: 'out' }];
 }
 
 function formatAtoms(atoms, decimals) {

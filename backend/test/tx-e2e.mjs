@@ -70,6 +70,7 @@ const { vaultAddress } = await import('../src/venues/manifest/instructions.js');
 const { OrderStore } = await import('../src/orders/orderStore.js');
 const { OrderService, UserError } = await import('../src/orders/orderService.js');
 const { Keeper, loadKeeperKeypair } = await import('../src/orders/keeper.js');
+const { Ledger } = await import('../src/orders/ledger.js');
 
 async function airdrop(pk, sol) {
     await connection.confirmTransaction(await connection.requestAirdrop(pk, sol * LAMPORTS_PER_SOL), 'confirmed');
@@ -108,8 +109,9 @@ const mBQ = await createMarket(BASE, QUOTE);
 const markets = new ManifestMarkets();
 await markets.scan();
 const store = new OrderStore();
-const service = new OrderService({ markets, store, keeperPubkey: keeper.publicKey });
-const keeperSvc = new Keeper({ markets, store, keypair: keeper });
+const ledger = new Ledger(path.join(dataDir, 'ledger.json'));
+const service = new OrderService({ markets, store, keeperPubkey: keeper.publicKey, ledger });
+const keeperSvc = new Keeper({ markets, store, keypair: keeper, ledger });
 service.onPlaced = (id) => keeperSvc.track(id);
 keeperSvc.start();
 const wallet = maker.publicKey.toBase58();
@@ -169,7 +171,9 @@ async function expectExpired(prepared, state) {
     const signed = sign(prepared);
     await outliveABlockhash();
     const before = await state();
+    const ledgerBefore = ledger.entries.length;
     await expectUserError(submit(prepared, signed), /took too long to approve and expired/);
+    assert.equal(ledger.entries.length, ledgerBefore, 'nothing recorded for tax: nothing happened');
     await assert.rejects(connection.sendRawTransaction(Buffer.from(signed[0], 'base64')), 'the expired signed transaction is dead');
     assert.deepEqual(await state(), before, 'nothing changed');
 }

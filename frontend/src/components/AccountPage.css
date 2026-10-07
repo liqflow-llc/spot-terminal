@@ -24,3 +24,10 @@
 .account-card .btn.danger:not(:disabled):hover { filter: brightness(1.08); }
 .account-card .btn.danger:disabled { opacity: 0.6; }
 .account-warning { color: var(--ask); font-weight: 500; }
+.tax-year { gap: 10px; }
+.tax-year select { height: 30px; padding: 0 8px; background: var(--bg); color: var(--text); border: 1px solid var(--border-2); border-radius: var(--radius); }
+.tax-apps { display: flex; flex-wrap: wrap; gap: 8px; }
+.tax-apps .btn { text-decoration: none; }
+.tax-howto { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+.tax-howto summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
+.tax-howto p { margin: 4px 0 8px 14px; font-size: 13px; color: var(--text-2); }

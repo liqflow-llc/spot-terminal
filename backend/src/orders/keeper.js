@@ -8,7 +8,8 @@ import { Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import { connection } from '../solana.js';
 import { config } from '../config.js';
 import { claimReservations } from './orderStore.js';
-import { placedSequenceNumber } from './sequence.js';
+import { placedSequenceNumber, takerFill } from './sequence.js';
+import { recordFill } from './ledger.js';
 import { errorDetail, log, short } from '../log.js';
 
 const SWEEP_MS = 20_000;
@@ -27,8 +28,9 @@ export function loadKeeperKeypair() {
 
 /** Emits 'claimed', 'expired', 'closed' and 'claim_failed' with the order (for notifications). */
 export class Keeper extends EventEmitter {
-    constructor({ markets, store, keypair }) {
+    constructor({ markets, store, keypair, ledger = null }) {
         super();
+        this.ledger = ledger; // fills and payouts, for tax exports (orders/ledger.js)
         this.markets = markets;
         this.store = store;
         this.keypair = keypair;
@@ -80,6 +82,8 @@ export class Keeper extends EventEmitter {
                 return;
             }
             this.store.update(order.id, { sequenceNumber: placed.sequenceNumber, placeSlot: placed.slot });
+            const taken = takerFill(placed, order);
+            if (taken) recordFill({ ledger: this.ledger, store: this.store, order: this.store.get(order.id), filledAtoms: taken.baseAtoms, quoteAtoms: taken.quoteAtoms });
             log.info('keeper', 'sequence_backfilled', { order: order.id, sequenceNumber: placed.sequenceNumber });
         }).finally(() => this.backfilling.delete(order.id));
     }
@@ -88,7 +92,7 @@ export class Keeper extends EventEmitter {
         const market = this.markets.get(marketAddress);
         if (!market) return;
         const slot = this.markets.slot;
-        const resting = new Set([...market.bids(), ...market.asks()].map(o => o.sequenceNumber.toString()));
+        const resting = new Map([...market.bids(), ...market.asks()].map(o => [o.sequenceNumber.toString(), o]));
         for (const order of this.store.active()) {
             if (order.market !== marketAddress || order.status !== 'open') continue;
             // Don't judge an order against market data older than the order itself.
@@ -102,7 +106,13 @@ export class Keeper extends EventEmitter {
             // Judged by slot, not by the book: an unchanged market account is never re-parsed, so the
             // cached book can still list an order after its expiry slot.
             const expired = order.lastValidSlot && slot > order.lastValidSlot;
-            if (!expired && resting.has(order.sequenceNumber)) continue;
+            const onBook = resting.get(order.sequenceNumber);
+            // Partial fills, as they're seen (the time is when we noticed: within one poll).
+            if (onBook) {
+                const filled = BigInt(order.baseAtoms) - BigInt(onBook.numBaseAtoms.toString());
+                if (filled > BigInt(order.filledAtoms || '0')) recordFill({ ledger: this.ledger, store: this.store, order, filledAtoms: filled });
+            }
+            if (!expired && onBook) continue;
 
             const wallet = new PublicKey(order.wallet);
             const balance = market.hasSeat(wallet)
@@ -135,6 +145,8 @@ export class Keeper extends EventEmitter {
     async submitClaim(order) {
         if (this.inFlight.has(order.id)) return;
         this.inFlight.add(order.id);
+        // It left the book with its proceeds in the seat: fully filled (whether or not the payout lands).
+        recordFill({ ledger: this.ledger, store: this.store, order, filledAtoms: order.baseAtoms });
         this.store.update(order.id, { status: 'claiming' });
         try {
             const tx = Transaction.from(Buffer.from(order.claimTx, 'base64'));
@@ -149,6 +161,10 @@ export class Keeper extends EventEmitter {
             if (res.value.err) throw new Error(JSON.stringify(res.value.err));
             // Landed, so the nonce was unused: no cancel can have gone through first.
             this.store.update(order.id, { status: 'claimed', claimSignature: signature, claimedAt: Date.now() });
+            this.ledger?.add({
+                key: `claim:${signature}`, wallet: order.wallet, kind: 'claim', sig: signature, market: order.market, orderId: order.id,
+                moves: [{ mint: order.proceedsMint, atoms: order.claimAtoms, dir: 'out' }],
+            });
             log.info('keeper', 'claimed', { order: order.id, wallet: short(order.wallet), market: short(order.market), sig: signature });
             this.emit('claimed', this.store.get(order.id));
         } catch (err) {

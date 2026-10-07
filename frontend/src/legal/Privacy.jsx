@@ -7,7 +7,8 @@ import './Legal.css';
 
 // Privacy Policy, modelled on LiqFlow's and w2w-chat's. Every claim describes what the code
 // does: backend/src/server.js (no request logging; IPs only in in-memory rate limits),
-// backend/src/orders/orderStore.js (what is stored per order), nginx's default access log, and
+// backend/src/orders/orderStore.js (what is stored per order), backend/src/orders/ledger.js (the
+// record behind tax reports), nginx's default access log, and
 // the browser storage below. If those change, this changes.
 
 const STORAGE = [
@@ -53,6 +54,8 @@ export default function Privacy() {
           <li>The transactions involved, including the payout transaction you signed, which the
             Service must keep to pay your order out</li>
           <li>The payout accounts created for your wallet</li>
+          <li>For your tax reports: the amounts each of these transactions moved between your wallet
+            and SpotBook, and when your orders filled</li>
         </ul>
         <h3>If you turn on notifications</h3>
         <p>
@@ -119,7 +122,7 @@ export default function Privacy() {
         <h2>6. How long it is kept</h2>
         <ul>
           <li><strong>Order records</strong> &mdash; for as long as the Service runs, because they
-            hold pending payouts and your order history. They are included in the server&apos;s
+            hold pending payouts, your order history and the record your tax reports are built from. They are included in the server&apos;s
             encrypted backups.</li>
           <li><strong>Access logs</strong> &mdash; {ACCESS_LOG_DAYS} days.</li>
           <li><strong>Notification push addresses</strong> &mdash; until you turn notifications off or

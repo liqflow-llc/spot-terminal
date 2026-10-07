@@ -175,6 +175,18 @@ try {
     if (await page.evaluate(() => window.__signCount) !== 4) throw new Error('closing the account should be exactly one approval');
     const baseAfterClose = BigInt((await connection.getTokenAccountBalance(spl.getAssociatedTokenAddressSync(BASE, user.publicKey))).value.amount);
     if (baseAfterClose - baseBeforeClose !== 1_000_000n) throw new Error(`the cancelled order's 1 BASE should be back (got ${baseAfterClose - baseBeforeClose})`);
+
+    step('Tax reports: the Account page offers a CSV per tax app, and the Koinly one holds this history');
+    await page.waitForFunction(() => document.querySelectorAll('.tax-apps a').length === 5, { timeout: 20000 });
+    const koinlyHref = await page.$eval('.tax-apps a', a => a.getAttribute('href'));
+    const koinly = await (await fetch(`${base}${koinlyHref}`)).text();
+    const lines = koinly.trim().split('\r\n');
+    console.log('  koinly csv:\n   ' + lines.join('\n   '));
+    if (lines[0] !== 'Date,Sent Amount,Sent Currency,Received Amount,Received Currency,Fee Amount,Fee Currency,Net Worth Amount,Net Worth Currency,Tag,Description,TxHash') throw new Error('Koinly header');
+    for (const want of ['payout-account rent deposit', 'funds for a limit order', 'limit order sell 10', 'filled order paid out', 'cancelled orders, funds returned', 'account closed, rent refunded']) {
+        if (!koinly.includes(want)) throw new Error(`Koinly CSV is missing: ${want}`);
+    }
+    if (!lines.slice(1).filter(l => !l.includes('limit order sell')).every(l => /,[1-9A-HJ-NP-Za-km-z]{60,90}$/.test(l))) throw new Error('every deposit / withdrawal carries its transaction hash');
     await shot('3-refunded');
 
     step('A buy priced far above the market gets a strong warning, and can be backed out of');

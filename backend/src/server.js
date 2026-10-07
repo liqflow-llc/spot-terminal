@@ -13,6 +13,8 @@ import { TradeStore, SUPPORTED_RESOLUTIONS } from './marketdata/tradeStore.js';
 import { OrderStore } from './orders/orderStore.js';
 import { OrderService, UserError } from './orders/orderService.js';
 import { Keeper, loadKeeperKeypair } from './orders/keeper.js';
+import { Ledger } from './orders/ledger.js';
+import { TAX_APPS, buildRows, exportCsv } from './tax/exports.js';
 import { aggregateBook } from './marketdata/aggregate.js';
 import { GeckoStats } from './marketdata/geckoStats.js';
 import { errorDetail, log, short, takeProblemCounts } from './log.js';
@@ -45,12 +47,13 @@ async function referencePrice(address) {
     return base > 0 && quote > 0 ? base / quote : null;
 }
 
+const ledger = new Ledger(); // what moved into / out of SpotBook, for the tax exports
 const orders = new OrderService({
-    markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey, referencePrice,
+    markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey, referencePrice, ledger,
     jupiter: (path, init) => registry.jupFetch(path, init),
     usdPrices: (mints) => registry.getPrices(mints),
 });
-const keeper = new Keeper({ markets, store: orderStore, keypair: keeperKeypair });
+const keeper = new Keeper({ markets, store: orderStore, keypair: keeperKeypair, ledger });
 orders.onPlaced = (id) => keeper.track(id);
 
 // ---------- push notifications for order events ----------
@@ -557,6 +560,44 @@ app.get('/api/tokens/:mint', rateLimit('tokens', 30, 60_000), async (req, res) =
             market: markets.marketsForPair(mint, q.mint).find(s => s.baseMint === mint)?.address || null,
         })),
     });
+});
+
+// ---------- tax exports: one CSV per tax app (tax/exports.js) ----------
+const taxWallet = (req, res) => {
+    const wallet = String(req.query.wallet || '');
+    try {
+        new PublicKey(wallet);
+        return wallet;
+    } catch {
+        res.status(400).json({ error: 'Invalid wallet address' });
+        return null;
+    }
+};
+app.get('/api/tax/summary', rateLimit('tax', 30, 60_000), (req, res) => {
+    const wallet = taxWallet(req, res);
+    if (!wallet) return;
+    const entries = ledger.forWallet(wallet).filter(e => !e.external);
+    res.set('Cache-Control', 'no-cache');
+    res.json({ apps: TAX_APPS, entries: entries.length, years: [...new Set(entries.map(e => new Date(e.at).getUTCFullYear()))].sort((a, b) => b - a) });
+});
+app.get('/api/tax/export', rateLimit('tax', 30, 60_000), (req, res) => {
+    const wallet = taxWallet(req, res);
+    if (!wallet) return;
+    const taxApp = String(req.query.app || '');
+    if (!TAX_APPS.includes(taxApp)) return res.status(400).json({ error: 'Unknown tax app' });
+    const year = req.query.year ? Number(req.query.year) : null;
+    if (year != null && !(Number.isInteger(year) && year >= 2020 && year <= 2100)) return res.status(400).json({ error: 'Invalid year' });
+    try {
+        const rows = buildRows(ledger.forWallet(wallet), (mint) => registry.display(mint), { year });
+        log.info('tax', 'export', { wallet: short(wallet), app: taxApp, year: year || 'all', rows: rows.length });
+        res.set('Content-Type', 'text/csv; charset=utf-8');
+        res.set('Content-Disposition', `attachment; filename="spotbook-${taxApp}-${year || 'all-time'}.csv"`);
+        res.set('Cache-Control', 'no-store');
+        res.send(exportCsv(taxApp, rows));
+    } catch (err) {
+        log.error('tax', 'export_failed', { wallet: short(wallet), app: taxApp, msg: errorDetail(err) });
+        res.status(500).json({ error: 'Could not build the export.' });
+    }
 });
 
 app.get('/api/payout-accounts', rateLimit('account', 40, 60_000), async (req, res) => {

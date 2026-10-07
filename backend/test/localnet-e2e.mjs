@@ -26,6 +26,7 @@ const { vaultAddress } = await import('../src/venues/manifest/instructions.js');
 const { OrderStore } = await import('../src/orders/orderStore.js');
 const { OrderService } = await import('../src/orders/orderService.js');
 const { Keeper, loadKeeperKeypair } = await import('../src/orders/keeper.js');
+const { Ledger } = await import('../src/orders/ledger.js');
 
 const NATIVE = spl.NATIVE_MINT;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -85,8 +86,9 @@ log('markets', mBQ, '(BASE/QUOTE)', mBS, '(BASE/SOL)');
 const markets = new ManifestMarkets();
 await markets.scan();
 const store = new OrderStore();
-const service = new OrderService({ markets, store, keeperPubkey: keeper.publicKey });
-const keeperSvc = new Keeper({ markets, store, keypair: keeper });
+const ledger = new Ledger(path.join(dataDir, 'ledger.json'));
+const service = new OrderService({ markets, store, keeperPubkey: keeper.publicKey, ledger });
+const keeperSvc = new Keeper({ markets, store, keypair: keeper, ledger });
 service.onPlaced = (id) => keeperSvc.track(id);
 keeperSvc.start();
 const inferred = []; // trades the market poller inferred from snapshots
@@ -404,6 +406,43 @@ await test('An expired order is marked expired and its funds come back with one 
     await signAndSubmit(await service.prepareCancel({ wallet, orderId: order.id }));
     assert.equal(store.get(order.id).status, 'cancelled');
     assert.equal(await tokenBalance(maker.publicKey, BASE), baseBefore, 'the 1 BASE is back');
+});
+
+await test('Tax ledger reconciles with the chain: deposits − withdrawals ± fills = what SpotBook holds, per token', async () => {
+    const wallet = maker.publicKey.toBase58();
+    const entries = ledger.forWallet(wallet);
+    const kinds = {};
+    for (const e of entries) kinds[e.kind] = (kinds[e.kind] || 0) + 1;
+    log('ledger entries by kind:', JSON.stringify(kinds));
+    for (const k of ['setup', 'place', 'fill', 'claim', 'cancel', 'edit', 'cancelAll', 'closePayout', 'closeAccount']) assert.ok(kinds[k], `recorded ${k}`);
+    const net = new Map(), fillsPerMint = new Map();
+    const add = (map, mint, v) => map.set(mint, (map.get(mint) || 0n) + v);
+    for (const e of entries) {
+        for (const m of e.moves) add(net, m.mint, m.dir === 'in' ? BigInt(m.atoms) : -BigInt(m.atoms));
+        if (e.trade) {
+            const t = e.trade, b = BigInt(t.baseAtoms), q = BigInt(t.quoteAtoms);
+            add(net, t.baseMint, t.side === 'sell' ? -b : b);
+            add(net, t.quoteMint, t.side === 'sell' ? q : -q);
+            add(fillsPerMint, t.quoteMint, 1n);
+        }
+    }
+    // What SpotBook holds for the wallet now: seat balances in every market it used (no open
+    // orders remain at this point), plus the rent in its payout accounts.
+    assert.equal(store.forWallet(wallet).filter(o => ['open', 'expired', 'claiming'].includes(o.status)).length, 0, 'no open orders left');
+    const held = new Map();
+    for (const address of new Set(store.forWallet(wallet).map(o => o.market))) {
+        const m = await markets.refresh(address);
+        if (!m.hasSeat(maker.publicKey)) continue;
+        add(held, m.baseMint().toBase58(), BigInt(m.getWithdrawableBalanceAtoms(maker.publicKey, true).toString()));
+        add(held, m.quoteMint().toBase58(), BigInt(m.getWithdrawableBalanceAtoms(maker.publicKey, false).toString()));
+    }
+    for (const n of store.noncesFor(wallet)) add(held, NATIVE.toBase58(), BigInt(await connection.getBalance(new PublicKey(n), 'confirmed')));
+    for (const mint of new Set([...net.keys(), ...held.keys()])) {
+        const diff = (net.get(mint) || 0n) - (held.get(mint) || 0n);
+        const tolerance = fillsPerMint.get(mint) || 0n; // the program may round each match by an atom
+        log(`${mint.slice(0, 6)}: ledger ${net.get(mint) || 0n}, held ${held.get(mint) || 0n}, diff ${diff}`);
+        assert.ok(diff >= -tolerance && diff <= tolerance, `${mint} reconciles within ${tolerance} atoms (diff ${diff})`);
+    }
 });
 
 await sleep(1000);
