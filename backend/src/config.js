@@ -14,9 +14,6 @@ if (!heliusKey && !process.env.RPC_URL) {
 export const config = {
     root,
     dataDir: process.env.DATA_DIR || path.join(root, 'data'),
-    // Time users get to approve a transaction in their wallet (durable nonces; see orders/signWindow.js).
-    signWindowSeconds: Number(process.env.SIGN_WINDOW_SECONDS) || 300,
-    signWindowNonces: Number(process.env.SIGN_WINDOW_NONCES) || 12,
     port: Number(process.env.PORT) || 3020,
     host: process.env.HOST || '127.0.0.1',
     rpcUrl: process.env.RPC_URL || `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`,

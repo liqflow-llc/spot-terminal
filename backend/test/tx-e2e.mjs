@@ -1,14 +1,16 @@
 // Transaction failure modes: the things that go wrong between "prepare" and "landed" when a real
 // person and a real wallet are in the loop. They're the hardest bugs to reproduce by hand, so each
 // one is reproduced here on purpose:
-//   - approving slowly (longer than a blockhash lives), and longer than our sign window
-//   - abandoning a request, a wallet that changes the transaction, the wrong signer, double submits
+//   - approving slower than a blockhash lives (~60-90 s on mainnet): a clear message, nothing
+//     changes, and the signed transaction can never land later
+//   - rejecting or abandoning a request, a wallet that changes the transaction, the wrong signer,
+//     double submits
 //   - the chain changing between prepare and approval (order filled before the cancel is signed)
-//   - not enough SOL, an exhausted sign-window pool
+//   - not enough SOL
 // Every failure must reach the user as a clear message (a UserError), never "Something went wrong".
 //
 // Self-contained: starts its own validator with 50 ms slots (8 ticks/slot) so a blockhash expires
-// in ~8 s instead of ~60 s, and the sign window is 20 s instead of 5 minutes.
+// in ~8 s instead of ~60-90 s.
 //
 //   cd backend && node test/tx-e2e.mjs [path-to-chrome]
 // Needs: network access (clones the Manifest program from mainnet), a test build of the frontend
@@ -25,7 +27,6 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const CHROME = process.argv[2] || '/usr/bin/google-chrome';
 const RPC_PORT = 8999;
 const RPC = `http://127.0.0.1:${RPC_PORT}`;
-const WINDOW_MS = 20_000;
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'spot-tx-'));
 const dataDir = path.join(tmp, 'data');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -69,7 +70,6 @@ const { vaultAddress } = await import('../src/venues/manifest/instructions.js');
 const { OrderStore } = await import('../src/orders/orderStore.js');
 const { OrderService, UserError } = await import('../src/orders/orderService.js');
 const { Keeper, loadKeeperKeypair } = await import('../src/orders/keeper.js');
-const { SignWindowPool } = await import('../src/orders/signWindow.js');
 
 async function airdrop(pk, sol) {
     await connection.confirmTransaction(await connection.requestAirdrop(pk, sol * LAMPORTS_PER_SOL), 'confirmed');
@@ -108,9 +108,7 @@ const mBQ = await createMarket(BASE, QUOTE);
 const markets = new ManifestMarkets();
 await markets.scan();
 const store = new OrderStore();
-const pool = new SignWindowPool({ keypair: keeper, size: 6, windowMs: WINDOW_MS, file: path.join(dataDir, 'sign-window.json') });
-await pool.start();
-const service = new OrderService({ markets, store, keeperPubkey: keeper.publicKey, signWindow: pool });
+const service = new OrderService({ markets, store, keeperPubkey: keeper.publicKey });
 const keeperSvc = new Keeper({ markets, store, keypair: keeper });
 service.onPlaced = (id) => keeperSvc.track(id);
 keeperSvc.start();
@@ -163,7 +161,24 @@ async function outliveABlockhash() {
     log(`a blockhash from the prepare time is now dead (${((Date.now() - started) / 1000).toFixed(1)}s)`);
 }
 
-const usedWindow = (prepared) => !!service.pending.get(prepared.id)?.lives?.[0]?.lease;
+/**
+ * Approved only after its blockhash died: the user gets a clear "took too long" message, `state()`
+ * is unchanged, and the signed transaction can never land later (nothing left to replay).
+ */
+async function expectExpired(prepared, state) {
+    const signed = sign(prepared);
+    await outliveABlockhash();
+    const before = await state();
+    await expectUserError(submit(prepared, signed), /took too long to approve and expired/);
+    await assert.rejects(connection.sendRawTransaction(Buffer.from(signed[0], 'base64')), 'the expired signed transaction is dead');
+    assert.deepEqual(await state(), before, 'nothing changed');
+}
+const walletState = async () => ({
+    // (A failed attempt is listed in the order history as "Failed"; it holds nothing.)
+    orders: store.forWallet(wallet).filter(o => o.status !== 'failed').map(o => `${o.id}:${o.status}:${o.price}`),
+    payoutAccounts: store.noncesFor(wallet).length,
+    base: String(await baseBalance()),
+});
 
 async function placeOrder(params) {
     let prepared = await service.prepareOrder({ wallet, ...params });
@@ -200,93 +215,54 @@ async function test(name, fn) {
     }
 }
 
-// ---------- slow approval: longer than a blockhash lives, inside the window ----------
+// ---------- slow approval: longer than a blockhash lives ----------
 
-await test('Setup approved after a blockhash would have expired (the reported bug) still goes through', async () => {
-    const prepared = await service.prepareSetup({ wallet });
-    assert.ok(usedWindow(prepared), 'built on a sign-window nonce');
-    await outliveABlockhash();
-    await submit(prepared);
+await test('Setup approved after its blockhash expired (the reported bug): clear message, nothing created; a fresh one works', async () => {
+    await expectExpired(await service.prepareSetup({ wallet }), walletState);
+    assert.equal(store.noncesFor(wallet).length, 0);
+    await submit(await service.prepareSetup({ wallet }));
     assert.equal(store.noncesFor(wallet).length, 2, 'payout accounts created');
 });
 
 let open1;
-await test('Order approved slowly still goes through', async () => {
+await test('Order approved too slowly: clear message, no order; a fresh one works', async () => {
     const prepared = await service.prepareOrder({ wallet, market: mBQ, side: 'sell', price: '3', size: '5' });
     assert.equal(prepared.step, 'sign');
-    assert.ok(usedWindow(prepared));
-    await outliveABlockhash();
-    const res = await submit(prepared);
-    open1 = store.get(res.orderId);
+    await expectExpired(prepared, walletState);
+    open1 = await placeOrder({ market: mBQ, side: 'sell', price: '3', size: '5' });
     assert.equal(open1.status, 'open');
 });
 
-await test('Edit approved slowly still goes through', async () => {
-    const prepared = await service.prepareEdit({ wallet, orderId: open1.id, price: '3.5', size: '4' });
-    assert.ok(usedWindow(prepared));
-    await outliveABlockhash();
-    const res = await submit(prepared);
+await test('Edit approved too slowly: clear message, the order is untouched; a fresh edit works', async () => {
+    await expectExpired(await service.prepareEdit({ wallet, orderId: open1.id, price: '3.5', size: '4' }), walletState);
+    assert.equal(store.get(open1.id).status, 'open');
+    const res = await submit(await service.prepareEdit({ wallet, orderId: open1.id, price: '3.5', size: '4' }));
     open1 = store.get(res.orderId);
-    assert.equal(open1.status, 'open');
     assert.equal(open1.price, 3.5);
 });
 
-await test('Cancel approved slowly still goes through', async () => {
-    const prepared = await service.prepareCancel({ wallet, orderId: open1.id });
-    assert.ok(usedWindow(prepared));
-    await outliveABlockhash();
-    await submit(prepared);
+await test('Cancel approved too slowly: clear message, the order stays open; a fresh cancel works', async () => {
+    await expectExpired(await service.prepareCancel({ wallet, orderId: open1.id }), walletState);
+    assert.equal(store.get(open1.id).status, 'open');
+    await submit(await service.prepareCancel({ wallet, orderId: open1.id }));
     assert.equal(store.get(open1.id).status, 'cancelled');
 });
 
-await test('Cancel all approved slowly still goes through', async () => {
+await test('Cancel all approved too slowly: clear message, orders stay open; a fresh one works', async () => {
     const a = await placeOrder({ market: mBQ, side: 'sell', price: '40', size: '1' });
     const b = await placeOrder({ market: mBQ, side: 'sell', price: '41', size: '1' });
-    const prepared = await service.prepareCancelAll({ wallet, market: mBQ });
-    assert.ok(usedWindow(prepared));
-    await outliveABlockhash();
-    await submit(prepared);
+    await expectExpired(await service.prepareCancelAll({ wallet, market: mBQ }), walletState);
+    await submit(await service.prepareCancelAll({ wallet, market: mBQ }));
     assert.equal(store.get(a.id).status, 'cancelled');
     assert.equal(store.get(b.id).status, 'cancelled');
 });
 
-await test('Create market approved slowly still goes through', async () => {
+await test('Create market approved too slowly: clear message, no market; a fresh one works', async () => {
     const TOKEN = await spl.createMint(connection, taker, taker.publicKey, null, 6);
     const prepared = await service.prepareCreateMarket({ wallet, baseMint: TOKEN.toBase58(), quoteMint: QUOTE.toBase58() });
-    assert.ok(usedWindow(prepared));
-    await outliveABlockhash();
-    const res = await submit(prepared);
+    await expectExpired(prepared, async () => ({ ...(await walletState()), market: !!(await connection.getAccountInfo(new PublicKey(prepared.market))) }));
+    const res = await submit(await service.prepareCreateMarket({ wallet, baseMint: TOKEN.toBase58(), quoteMint: QUOTE.toBase58() }));
     assert.ok(await connection.getAccountInfo(new PublicKey(res.market)), 'market exists');
-});
-
-// ---------- too slow: past the sign window ----------
-
-await test('Approved after the sign window: refused clearly, nothing happens, and the signed copy can never land', async () => {
-    const baseBefore = await baseBalance();
-    const prepared = await service.prepareOrder({ wallet, market: mBQ, side: 'sell', price: '50', size: '1' });
-    const signed = sign(prepared);
-    const ordersBefore = store.forWallet(wallet).length;
-    log(`waiting past the ${WINDOW_MS / 1000}s window…`);
-    await sleep(WINDOW_MS + 1500);
-    await expectUserError(submit(prepared, signed), /wasn't approved within/);
-    assert.equal(store.forWallet(wallet).length, ordersBefore, 'no order recorded');
-    // Someone who kept the signed transaction tries to send it anyway, after the void.
-    await pool.sweep();
-    await assert.rejects(connection.sendRawTransaction(Buffer.from(signed[0], 'base64')), 'the signed place transaction is dead');
-    await sleep(1000);
-    assert.equal(await baseBalance(), baseBefore, 'no tokens moved');
-});
-
-await test('An abandoned request\'s window nonce is voided before reuse', async () => {
-    const prepared = await service.prepareOrder({ wallet, market: mBQ, side: 'sell', price: '50', size: '1' });
-    const lease = service.pending.get(prepared.id).lives[0].lease;
-    const signed = sign(prepared); // the user signed, then the page was closed before sending
-    service.dropPending(prepared.id); // what the expiry timer does
-    await pool.sweep();
-    const n = pool.nonces.get(lease.address);
-    assert.notEqual(n.value, lease.value, 'nonce advanced');
-    assert.equal(n.state, 'free', 'and back in the pool');
-    await assert.rejects(connection.sendRawTransaction(Buffer.from(signed[0], 'base64')), 'old signed copy is dead');
 });
 
 // ---------- wallets doing unexpected things ----------
@@ -302,7 +278,7 @@ await test('A wallet that changes the transaction is refused, and the request ca
 await test('Signed by a different wallet: refused', async () => {
     const prepared = await service.prepareOrder({ wallet, market: mBQ, side: 'sell', price: '60', size: '1' });
     await expectUserError(submit(prepared, sign(prepared, taker)), /missing the wallet signature|Invalid signature/);
-    service.dropPending(prepared.id);
+    service.abandon({ id: prepared.id });
 });
 
 await test('The same approval submitted twice (double click, retry): one order, a clear second answer', async () => {
@@ -351,25 +327,6 @@ await test('Not enough SOL for the setup: a clear message', async () => {
     await expectUserError(submit(prepared, signed), /Not enough SOL/);
 });
 
-await test('Sign-window pool exhausted: falls back to the ~1 minute window and still works', async () => {
-    const held = [];
-    for (let i = 0; ; i++) {
-        const lease = pool.acquire(`filler-${i}`);
-        if (!lease) break;
-        held.push(lease);
-    }
-    log('held', held.length, 'leases; pool empty');
-    try {
-        const prepared = await service.prepareOrder({ wallet, market: mBQ, side: 'sell', price: '80', size: '1' });
-        assert.ok(!usedWindow(prepared), 'recent blockhash instead');
-        const res = await submit(prepared);
-        assert.equal(store.get(res.orderId).status, 'open');
-        await submit(await service.prepareCancel({ wallet, orderId: res.orderId }));
-    } finally {
-        held.forEach(l => pool.unuse(l));
-    }
-});
-
 await test('An unsigned (rejected or abandoned) request never makes the next order ask for setup again', async () => {
     const w2 = Keypair.generate();
     await airdrop(w2.publicKey, 5);
@@ -396,25 +353,15 @@ await test('An unsigned (rejected or abandoned) request never makes the next ord
     assert.equal(store.get(res.orderId).status, 'open');
 });
 
-await test('The keeper only ever signs the nonce advance', async () => {
-    const lease = pool.acquire('safety-check');
-    const tx = new Transaction({ feePayer: maker.publicKey, blockhash: lease.value, lastValidBlockHeight: 0 });
-    tx.add(SystemProgram.transfer({ fromPubkey: keeper.publicKey, toPubkey: maker.publicKey, lamports: 1 }));
-    assert.throws(() => pool.signLegacy(tx, lease), /refusing/);
-    pool.unuse(lease);
-});
-
-await test('Refund approved slowly still goes through', async () => {
-    const prepared = await service.prepareClosePayout({ wallet });
-    assert.ok(usedWindow(prepared));
-    await outliveABlockhash();
-    const res = await submit(prepared);
+await test('Refund approved too slowly: clear message, deposit still there; a fresh refund works', async () => {
+    await expectExpired(await service.prepareClosePayout({ wallet }), walletState);
+    const res = await submit(await service.prepareClosePayout({ wallet }));
     assert.ok(res.refundedSol > 0);
 });
 
 // ---------- the same, through the real UI ----------
 
-await test('UI: slow at the setup dialog and slow in the wallet → order placed; too slow → clear message; reject → "Cancelled"', async () => {
+await test('UI: slow at the setup dialog → order placed; too slow in the wallet → clear message; reject → "Cancelled", and the retry needs no new setup', async () => {
     const dist = path.join(here, '../../frontend/dist-test');
     if (!fs.existsSync(path.join(dist, 'index.html'))) throw new Error('build the test frontend first: (cd frontend && npm run build:test)');
     const { default: puppeteer } = await import('puppeteer-core');
@@ -431,14 +378,14 @@ await test('UI: slow at the setup dialog and slow in the wallet → order placed
     backend = spawn(process.execPath, [path.join(here, '../src/server.js')], {
         env: {
             ...process.env, DATA_DIR: uiData, PORT: String(PORT), KEEPER_KEYPAIR: path.join(uiData, 'keeper.json'),
-            FRONTEND_DIST: dist, SIGN_WINDOW_SECONDS: String(WINDOW_MS / 1000), SIGN_WINDOW_NONCES: '6',
+            FRONTEND_DIST: dist,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
     });
     let backendLog = '';
     backend.stdout.on('data', d => { backendLog += d; });
     backend.stderr.on('data', d => { backendLog += d; });
-    await waitFor(() => backendLog.includes('[sign-window] ready'), 'backend sign window ready', 60_000);
+    await waitFor(() => backendLog.includes('[server] listening'), 'backend up', 60_000);
     const base = `http://127.0.0.1:${PORT}`;
 
     browser = await puppeteer.launch({ executablePath: CHROME, headless: 'new', userDataDir: path.join(tmp, 'chrome'), args: ['--no-first-run'] });
@@ -467,7 +414,7 @@ await test('UI: slow at the setup dialog and slow in the wallet → order placed
         await clickText('.wallet-adapter-modal button', 'Mock Wallet');
         await page.waitForFunction(() => !document.querySelector('.topbar .wallet-adapter-button')?.textContent.includes('Select'), { timeout: 15000 });
 
-        log('UI: reading the setup dialog slowly, then approving slowly in the wallet');
+        log('UI: reading the setup dialog for longer than a blockhash lives (the setup is built after Continue)');
         await clickText('.of-side', 'Sell');
         await setField('Price', '90');
         await setField('Amount', '1');
@@ -475,17 +422,16 @@ await test('UI: slow at the setup dialog and slow in the wallet → order placed
         await clickText('.of-submit', 'Sell');
         await page.waitForFunction(() => document.querySelector('.modal')?.textContent.includes('Account page'), { timeout: 30000 });
         await sleep(10_000); // longer than a blockhash lives here
-        await page.evaluate(() => { window.__wallet.delayMs = 10_000; });
         await clickText('.modal button', 'Continue');
         await toastSays('order placed', 90_000);
         assert.equal(await page.evaluate(() => window.__signCount), 2, 'setup + order');
 
-        log('UI: approving after the window closes');
+        log('UI: approving in the wallet for longer than a blockhash lives');
         await clearToasts();
-        await page.evaluate((ms) => { window.__wallet.delayMs = ms; }, WINDOW_MS + 5000);
+        await page.evaluate(() => { window.__wallet.delayMs = 12_000; });
         await setField('Amount', '1');
         await clickText('.of-submit', 'Sell');
-        await toastSays("wasn't approved within", WINDOW_MS + 60_000);
+        await toastSays('took too long to approve', 60_000);
         const text = await page.evaluate(() => [...document.querySelectorAll('.toast')].map(t => t.textContent).join(' | '));
         log('UI shows:', text);
         assert.ok(!/Something went wrong/.test(text));
@@ -498,11 +444,13 @@ await test('UI: slow at the setup dialog and slow in the wallet → order placed
         await toastSays('Cancelled in wallet', 30_000);
         await page.evaluate(() => { window.__wallet.reject = false; });
 
-        log('UI: and right after, a normal order works');
+        log('UI: and right after, a normal order works with no second setup');
         await clearToasts();
+        const approvals = await page.evaluate(() => window.__signCount);
         await setField('Amount', '1');
         await clickText('.of-submit', 'Sell');
         await toastSays('order placed', 60_000);
+        assert.equal(await page.evaluate(() => window.__signCount), approvals + 1, 'one approval: no setup asked again');
     } catch (err) {
         // What the user was looking at, and what the server said.
         const toasts = await page?.evaluate(() => [...document.querySelectorAll('.toast')].map(t => t.textContent)).catch(() => []);
@@ -527,7 +475,6 @@ await test('UI: slow at the setup dialog and slow in the wallet → order placed
 
 console.log(failures ? `\n${failures} test(s) FAILED` : '\nAll transaction tests passed');
 keeperSvc.stop?.();
-pool.stop();
 cleanup();
 fs.rmSync(tmp, { recursive: true, force: true });
 process.exit(failures ? 1 : 0);

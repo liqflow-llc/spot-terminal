@@ -13,7 +13,6 @@ import { TradeStore, SUPPORTED_RESOLUTIONS } from './marketdata/tradeStore.js';
 import { OrderStore } from './orders/orderStore.js';
 import { OrderService, UserError } from './orders/orderService.js';
 import { Keeper, loadKeeperKeypair } from './orders/keeper.js';
-import { SignWindowPool } from './orders/signWindow.js';
 import { aggregateBook } from './marketdata/aggregate.js';
 import { GeckoStats } from './marketdata/geckoStats.js';
 import { errorDetail, log, short, takeProblemCounts } from './log.js';
@@ -46,11 +45,8 @@ async function referencePrice(address) {
     return base > 0 && quote > 0 ? base / quote : null;
 }
 
-// Users get 5 minutes to approve a transaction, not the ~1 minute a recent blockhash allows.
-const signWindow = new SignWindowPool({ keypair: keeperKeypair, size: config.signWindowNonces, windowMs: config.signWindowSeconds * 1000 });
-signWindow.start().catch(err => log.error('sign-window', 'start_failed', { msg: errorDetail(err), note: 'transactions get ~1 minute to approve' }));
 const orders = new OrderService({
-    markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey, referencePrice, signWindow,
+    markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey, referencePrice,
     jupiter: (path, init) => registry.jupFetch(path, init),
     usdPrices: (mints) => registry.getPrices(mints),
 });
@@ -583,7 +579,6 @@ const logHealth = async () => {
             archer: archer.connected ? `up(${archer.subs.size})` : 'down',
             openOrders: orderStore.active().length,
             keeperSol: lamports == null ? '?' : (lamports / 1e9).toFixed(4),
-            signWindow: signWindow.ready ? `${signWindow.freeCount()}/${signWindow.nonces.size}` : 'off',
             rpcCalls: rpc.calls, credits15m: rpc.credits, creditsPerDay: Math.round(rpc.credits * 96), topRpc: rpc.top,
             rssMb: Math.round(process.memoryUsage().rss / 1e6),
             problems: takeProblemCounts(),

@@ -36,7 +36,7 @@ Users never deposit, withdraw or wrap SOL by hand.
   - `venues/manifest/fills.js` FillLog / batch-update return-data parsing for our own transactions
   - `venues/manifest/instructions.js` core-program instructions and exact price/claim math
   - `marketdata/` trades, 1m candles (GeckoTerminal backfill), aggregated books
-  - `orders/` order service (prepare/verify/submit/cancel), order store, keeper, sign window
+  - `orders/` order service (prepare/verify/submit/cancel), order store, keeper
   - `test/localnet-e2e.mjs` end-to-end tests against the real Manifest program on a local validator
   - `test/tx-e2e.mjs` transaction failure modes (slow/rejected/changed approvals, stale state)
 - `frontend/` React + Vite, TradingView Advanced Charts (licensed bundle, not committed)
@@ -59,13 +59,6 @@ The keeper keypair is generated on first start; **fund it with a little SOL** be
 (each claim costs ~0.00001 SOL in fees). Without SOL the keeper can't submit claims and filled
 proceeds wait in the market until the user withdraws them from the app.
 
-Users get **5 minutes** to approve a transaction in their wallet (`SIGN_WINDOW_SECONDS`), not the
-~1 minute a recent blockhash lasts: every transaction they sign is built on a durable nonce from a
-small pool the keeper owns (`orders/signWindow.js`, ~0.0015 SOL rent each, 12 by default). The
-keeper's co-signature only covers advancing that nonce. A nonce is never reused until its
-transaction landed or the keeper has voided it, so an abandoned signed transaction can't execute
-later. If the pool is empty, transactions fall back to a recent blockhash.
-
 ## Tests
 
 ```bash
@@ -78,7 +71,7 @@ cd frontend && npm run build:test && cd ../backend && node test/ui-e2e.mjs
 ```
 
 Transaction failure modes have their own suite, which starts its own validator with 50 ms slots
-(a blockhash dies in ~8 s, the sign window is 20 s) so slow approvals reproduce in seconds:
+(a blockhash dies in ~8 s instead of ~60-90 s) so slow approvals reproduce in seconds:
 
 ```bash
 cd frontend && npm run build:test && cd ../backend && node test/tx-e2e.mjs
