@@ -239,12 +239,13 @@ export class TokenRegistry {
     }
 
     /**
-     * 'stable' (USD/EUR stablecoins and Jupiter Lend tokens of them), 'lst' (liquid staked SOL and
-     * SOL yield tokens), or null, from Jupiter's token tags. Used to keep these pairs out of the
-     * default market list (their volume would bury everything else).
+     * 'stable' (USD/EUR stablecoins and Jupiter Lend tokens of them), 'stock' (tokenized stocks:
+     * xStocks, Ondo, Backpack, PreStocks), 'lst' (liquid staked SOL and SOL yield tokens), or null,
+     * from Jupiter's token tags. These pairs have their own tabs instead of the default market list.
      */
     static kindFromTags(tags = [], symbol = '') {
         if (tags.includes('stable')) return 'stable';
+        if (tags.includes('stocks')) return 'stock';
         if (tags.includes('lst')) return 'lst';
         if (tags.includes('yield') || tags.includes('jup-lend-earn')) {
             if (/usd|eur/i.test(symbol)) return 'stable';
