@@ -55,7 +55,7 @@ export default function Privacy() {
             Service must keep to pay your order out</li>
           <li>The payout accounts created for your wallet</li>
           <li>For your tax reports: the amounts each of these transactions moved between your wallet
-            and SpotBook, and when your orders filled</li>
+            and SpotTerminal, and when your orders filled</li>
         </ul>
         <h3>If you turn on notifications</h3>
         <p>

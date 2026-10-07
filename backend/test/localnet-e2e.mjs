@@ -408,7 +408,7 @@ await test('An expired order is marked expired and its funds come back with one 
     assert.equal(await tokenBalance(maker.publicKey, BASE), baseBefore, 'the 1 BASE is back');
 });
 
-await test('Tax ledger reconciles with the chain: deposits − withdrawals ± fills = what SpotBook holds, per token', async () => {
+await test('Tax ledger reconciles with the chain: deposits − withdrawals ± fills = what SpotTerminal holds, per token', async () => {
     const wallet = maker.publicKey.toBase58();
     const entries = ledger.forWallet(wallet);
     const kinds = {};
@@ -426,7 +426,7 @@ await test('Tax ledger reconciles with the chain: deposits − withdrawals ± fi
             add(fillsPerMint, t.quoteMint, 1n);
         }
     }
-    // What SpotBook holds for the wallet now: seat balances in every market it used (no open
+    // What SpotTerminal holds for the wallet now: seat balances in every market it used (no open
     // orders remain at this point), plus the rent in its payout accounts.
     assert.equal(store.forWallet(wallet).filter(o => ['open', 'expired', 'claiming'].includes(o.status)).length, 0, 'no open orders left');
     const held = new Map();

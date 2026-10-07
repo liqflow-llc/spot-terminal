@@ -1,7 +1,7 @@
-// CSV exports of a wallet's SpotBook activity for crypto tax software, one file per app in the
+// CSV exports of a wallet's SpotTerminal activity for crypto tax software, one file per app in the
 // format that app documents for custom imports.
 //
-// The model: SpotBook is an account of the user's. Funds moving into it (order funds, payout
+// The model: SpotTerminal is an account of the user's. Funds moving into it (order funds, payout
 // account rent) are deposits; funds coming back (payouts, cancels, refunds) are withdrawals; both
 // carry the wallet transaction's hash so the app pairs them with the user's imported Solana wallet
 // as transfers between their own accounts (not sales). A limit order fill is a trade inside the
@@ -18,7 +18,7 @@ import { SOL_MINT } from '../orders/ledger.js';
 
 export const TAX_APPS = ['koinly', 'cointracker', 'coinledger', 'awaken', 'cointracking'];
 
-const PLATFORM = 'SpotBook';
+const PLATFORM = 'SpotTerminal';
 
 /** 1234500n, 6 -> "1.2345" (exact, never exponent notation). */
 function atomsToDecimal(atoms, decimals) {

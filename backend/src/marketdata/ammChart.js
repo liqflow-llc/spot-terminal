@@ -1,5 +1,5 @@
 // The "all Solana" chart: candles from the most active pool trading the pair anywhere on Solana
-// (Orca, Raydium, Meteora, ...), via GeckoTerminal. The Manifest chart shows SpotBook's own book,
+// (Orca, Raydium, Meteora, ...), via GeckoTerminal. The Manifest chart shows SpotTerminal's own book,
 // which is what limit orders fill against; this one shows where the market as a whole traded.
 //
 // Pool choice: the pair's own pool with the most 24h volume (not liquidity: some pools report

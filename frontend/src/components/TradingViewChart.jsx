@@ -66,7 +66,7 @@ export default function TradingViewChart({ address, onTrade, orders = [], onCanc
   const addressRef = useRef(address); // the market we should show
   const shownRef = useRef(null);      // the market the chart was last told to show
   const [error, setError] = useState(null);
-  // Which chart: SpotBook's own book (the default: what limit orders fill against), or the most
+  // Which chart: SpotTerminal's own book (the default: what limit orders fill against), or the most
   // active pool for the pair anywhere on Solana.
   const [source, setSource] = useState('manifest');
   const ticker = source === 'amm' ? ammTicker(address) : address;

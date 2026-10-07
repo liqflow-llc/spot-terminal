@@ -1,14 +1,14 @@
-// What each wallet moved into and out of SpotBook, and every fill inside it: the record the
+// What each wallet moved into and out of SpotTerminal, and every fill inside it: the record the
 // tax-software exports are built from (tax/exports.js).
 //
 // Tax apps see a wallet's own transactions, but a limit order's fill happens in someone else's
-// transaction and its funds sit in the market's shared vault. So the exports describe SpotBook as
+// transaction and its funds sit in the market's shared vault. So the exports describe SpotTerminal as
 // an account of the user's: deposits into it (order funds, payout-account rent) and withdrawals
 // out of it (payouts, cancels, refunds) carry the wallet transaction's hash, so the tax app pairs
 // them with the wallet import as transfers; fills are trades inside it at the order's price.
 //
 // Entry: { key, wallet, at, kind, sig?, orderId?, market?, moves: [{ mint, atoms, dir }], trade? }
-//   dir 'in'  = wallet -> SpotBook, 'out' = SpotBook -> wallet (atoms: positive integer string)
+//   dir 'in'  = wallet -> SpotTerminal, 'out' = SpotTerminal -> wallet (atoms: positive integer string)
 //   trade = { side, baseMint, quoteMint, baseAtoms, quoteAtoms, price } (side: the user's side)
 //   external: true marks wallet-level swaps (Jupiter), which the tax apps read from the wallet itself.
 import fs from 'fs';

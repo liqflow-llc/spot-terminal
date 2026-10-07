@@ -17,11 +17,11 @@ const sol = (n) => `${Number(n || 0).toFixed(5)} SOL`;
 
 // One CSV per tax app, each in the format that app documents for custom imports.
 const TAX_APPS = [
-  { id: 'koinly', name: 'Koinly', howto: 'Add a new wallet named SpotBook (pick the custom / other option if asked), then use Import from file and upload the Koinly CSV. Koinly matches its deposits and withdrawals with your imported Solana wallet by transaction ID, and the token columns include each mint address so the right token is picked.' },
-  { id: 'cointracker', name: 'CoinTracker', howto: 'Go to Wallets → Add wallets, search for CSV, and upload the CoinTracker CSV as a wallet named SpotBook. CoinTracker pairs its sends and receives with your Solana wallet as transfers.' },
-  { id: 'coinledger', name: 'CoinLedger', howto: 'Upload the CoinLedger CSV under Import → Other Account (the universal manual import), then use Edit Name to call it SpotBook. Deposits and withdrawals are self-transfers there.' },
+  { id: 'koinly', name: 'Koinly', howto: 'Add a new wallet named SpotTerminal (pick the custom / other option if asked), then use Import from file and upload the Koinly CSV. Koinly matches its deposits and withdrawals with your imported Solana wallet by transaction ID, and the token columns include each mint address so the right token is picked.' },
+  { id: 'cointracker', name: 'CoinTracker', howto: 'Go to Wallets → Add wallets, search for CSV, and upload the CoinTracker CSV as a wallet named SpotTerminal. CoinTracker pairs its sends and receives with your Solana wallet as transfers.' },
+  { id: 'coinledger', name: 'CoinLedger', howto: 'Upload the CoinLedger CSV under Import → Other Account (the universal manual import), then use Edit Name to call it SpotTerminal. Deposits and withdrawals are self-transfers there.' },
   { id: 'awaken', name: 'Awaken', howto: 'Add a new account using CSV upload and upload the Awaken CSV. With your Solana wallet also imported, Awaken matches the transfers between the two accounts. Amounts are limited to 8 decimal places, so dust below that is left out.' },
-  { id: 'cointracking', name: 'CoinTracking', howto: 'Use the bulk import (Enter Coins → Import). The file follows the bulk-import column order with Trade, Deposit and Withdrawal types and SpotBook as the exchange. If it only accepts its Excel template, paste these rows into the template.' },
+  { id: 'cointracking', name: 'CoinTracking', howto: 'Use the bulk import (Enter Coins → Import). The file follows the bulk-import column order with Trade, Deposit and Withdrawal types and SpotTerminal as the exchange. If it only accepts its Excel template, paste these rows into the template.' },
 ];
 
 export default function AccountPage() {
@@ -142,8 +142,8 @@ export default function AccountPage() {
         <section className="account-card">
           <h2>Tax reports</h2>
           <p className="muted">
-            Your SpotBook activity as a CSV file for your tax app. Import your Solana wallet in the app as usual,
-            then add this file as a separate account named SpotBook. Money moving into and out of SpotBook keeps
+            Your SpotTerminal activity as a CSV file for your tax app. Import your Solana wallet in the app as usual,
+            then add this file as a separate account named SpotTerminal. Money moving into and out of SpotTerminal keeps
             your wallet&apos;s transaction IDs, so the app pairs it as transfers between your own accounts, and each
             limit order fill is a trade at your order&apos;s price.
           </p>
@@ -152,7 +152,7 @@ export default function AccountPage() {
           ) : !tax ? (
             <div className="account-row"><span className="spinner" /> Loading…</div>
           ) : tax.entries === 0 ? (
-            <div className="account-row">No SpotBook activity yet.</div>
+            <div className="account-row">No SpotTerminal activity yet.</div>
           ) : (
             <>
               <label className="account-row tax-year">

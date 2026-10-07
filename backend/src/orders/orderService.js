@@ -205,7 +205,7 @@ function parseMint(mint) {
 
 export class OrderService {
     constructor({ markets, store, keeperPubkey, referencePrice = null, jupiter = null, usdPrices = null, ledger = null }) {
-        this.ledger = ledger; // what moved into / out of SpotBook, for tax exports (orders/ledger.js)
+        this.ledger = ledger; // what moved into / out of SpotTerminal, for tax exports (orders/ledger.js)
         this.markets = markets;
         this.usdPrices = usdPrices; // async (mints) => { mint: usd } (to value transaction fees)
         this.jupiter = jupiter; // (pathAndQuery, { method, body }) => Promise<json>, rate limited
@@ -256,7 +256,7 @@ export class OrderService {
         return BigInt(order.baseAtoms) - (resting ? BigInt(resting.numBaseAtoms.toString()) : 0n);
     }
 
-    /** Record a landed transaction's fills (first) and its moves between the wallet and SpotBook. */
+    /** Record a landed transaction's fills (first) and its moves between the wallet and SpotTerminal. */
     recordLanded({ kind, wallet, sig, moves = [], fills = [], market = null, orderId = null }) {
         for (const f of fills) {
             const order = this.store.get(f.orderId);
@@ -1468,7 +1468,7 @@ export class OrderService {
     }
 }
 
-/** A withdraw-all's amounts as ledger moves out of SpotBook. */
+/** A withdraw-all's amounts as ledger moves out of SpotTerminal. */
 function withdrawMoves(ctx, withdrawn) {
     if (!withdrawn) return [];
     return [{ mint: ctx.baseMint, atoms: withdrawn.base, dir: 'out' }, { mint: ctx.quoteMint, atoms: withdrawn.quote, dir: 'out' }];

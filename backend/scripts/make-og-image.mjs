@@ -7,7 +7,7 @@ import { BRAND } from '../../frontend/src/brand.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const out = path.join(here, '../../frontend/public');
-const [first, second] = BRAND.endsWith('Book') ? [BRAND.slice(0, -4), 'Book'] : [BRAND, ''];
+const [first, second] = BRAND.endsWith('Terminal') ? [BRAND.slice(0, -8), 'Terminal'] : [BRAND, ''];
 
 // A stylised order book ladder: asks above, bids below, deepest levels widest.
 const asks = [0.34, 0.52, 0.41, 0.66, 0.83];

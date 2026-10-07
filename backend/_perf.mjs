@@ -1,6 +1,6 @@
 import puppeteer from 'puppeteer-core';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const url = process.argv[2] || 'https://juporderbook.com/';
+const url = process.argv[2] || 'https://spotterminal.com/';
 const browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: 'new', userDataDir: '/home/phil/.claude/jobs/5dcd34b5/tmp/chrome-perf-' + Date.now(), args: ['--no-first-run'] });
 for (const [label, vp] of [['desktop', { width: 1600, height: 920 }], ['phone', { width: 412, height: 880, deviceScaleFactor: 2, isMobile: true, hasTouch: true }]]) {
   const page = await browser.newPage();

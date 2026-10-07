@@ -3,5 +3,5 @@
 // The planned name is "LiqBook" (liqbook.com). It stays off the live site until the domain is
 // registered, so nobody can grab the domain first. Once it is bought, change these two lines,
 // the <title> in index.html, and Plausible's data-domain.
-export const BRAND = 'SpotBook';
-export const SITE = 'juporderbook.com';
+export const BRAND = 'SpotTerminal';
+export const SITE = 'spotterminal.com';

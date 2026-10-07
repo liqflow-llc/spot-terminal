@@ -6,7 +6,7 @@ import './TopBar.css';
 export default function TopBar() {
   return (
     <header className="topbar">
-      <Link to="/" className="brand">{BRAND.replace(/Book$/, '')}<span>Book</span></Link>
+      <Link to="/" className="brand">{BRAND.replace(/Terminal$/, "")}<span>Terminal</span></Link>
       <nav className="topnav">
         <NavLink to="/" className={({ isActive }) => `topnav-item ${isActive || window.location.pathname.startsWith('/trade') ? 'active' : ''}`} end>Trade</NavLink>
         <NavLink to="/account" className={({ isActive }) => `topnav-item ${isActive ? 'active' : ''}`}>Account</NavLink>

@@ -2,8 +2,8 @@
 // and opens the market when one is tapped.
 self.addEventListener('push', (event) => {
   let data = {};
-  try { data = event.data ? event.data.json() : {}; } catch { data = { title: 'SpotBook', body: event.data?.text() }; }
-  event.waitUntil(self.registration.showNotification(data.title || 'SpotBook', {
+  try { data = event.data ? event.data.json() : {}; } catch { data = { title: 'SpotTerminal', body: event.data?.text() }; }
+  event.waitUntil(self.registration.showNotification(data.title || 'SpotTerminal', {
     body: data.body || '',
     icon: '/icon-192.png',
     badge: '/icon-192.png',

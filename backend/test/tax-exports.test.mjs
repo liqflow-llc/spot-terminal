@@ -33,7 +33,7 @@ const line = (app, i) => files[app][i];
 
 // Koinly universal template + extended symbol notation.
 assert.equal(line('koinly', 0), 'Date,Sent Amount,Sent Currency,Received Amount,Received Currency,Fee Amount,Fee Currency,Net Worth Amount,Net Worth Currency,Tag,Description,TxHash');
-assert.equal(line('koinly', 1), '2026-10-07 01:14:39,,,0.00289536,SOL,,,,,,SpotBook: payout-account rent deposit (refundable),SIG1');
+assert.equal(line('koinly', 1), '2026-10-07 01:14:39,,,0.00289536,SOL,,,,,,SpotTerminal: payout-account rent deposit (refundable),SIG1');
 assert.match(line('koinly', 3), /^2026-10-07 02:14:39,0\.01,SOL,1\.2,USDC:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v:SOL,/);
 assert.match(line('koinly', 4), /^2026-10-07 02:14:40,1\.19999,USDC:EPjF\w+:SOL,,,.*,SIG3$/);
 
@@ -44,8 +44,8 @@ assert.equal(line('cointracker', 4), '10/07/2026 02:14:40,,,1.19999,USDC,,,');
 
 // CoinLedger universal manual import: Type on every deposit / withdrawal.
 assert.equal(line('coinledger', 0), 'Date (UTC),Platform (Optional),Asset Sent,Amount Sent,Asset Received,Amount Received,Fee Currency (Optional),Fee Amount (Optional),Type,Description (Optional),TxHash (Optional)');
-assert.match(line('coinledger', 1), /^10\/07\/2026 01:14:39,SpotBook,,,SOL,0\.00289536,,,Deposit,/);
-assert.match(line('coinledger', 3), /^10\/07\/2026 02:14:39,SpotBook,SOL,0\.01,USDC,1\.2,,,Trade,/);
+assert.match(line('coinledger', 1), /^10\/07\/2026 01:14:39,SpotTerminal,,,SOL,0\.00289536,,,Deposit,/);
+assert.match(line('coinledger', 3), /^10\/07\/2026 02:14:39,SpotTerminal,SOL,0\.01,USDC,1\.2,,,Trade,/);
 assert.match(line('coinledger', 6), /,Withdrawal,.*,SIG4$/);
 
 // Awaken: its columns plus Transaction Hash and Tag; at most 8 decimals.
@@ -55,8 +55,8 @@ assert.match(line('awaken', 5), /^01\/02\/2027 00:00:00,1\.5,Bonk,0\.000003,USDC
 
 // CoinTracking bulk import order; deposits buy, withdrawals sell; unique Tx-ID per row.
 assert.equal(line('cointracking', 0), 'Type,Buy Amount,Buy Currency,Sell Amount,Sell Currency,Fee,Fee Currency,Exchange,Trade-Group,Comment,Date,Liquidity Pool,Tx-ID');
-assert.match(line('cointracking', 1), /^Deposit,0\.00289536,SOL,,,,,SpotBook,SpotBook,.*,2026-10-07 01:14:39,,SIG1:0$/);
-assert.match(line('cointracking', 3), /^Trade,1\.2,USDC,0\.01,SOL,,,SpotBook,SpotBook,/);
+assert.match(line('cointracking', 1), /^Deposit,0\.00289536,SOL,,,,,SpotTerminal,SpotTerminal,.*,2026-10-07 01:14:39,,SIG1:0$/);
+assert.match(line('cointracking', 3), /^Trade,1\.2,USDC,0\.01,SOL,,,SpotTerminal,SpotTerminal,/);
 assert.match(line('cointracking', 4), /^Withdrawal,,,1\.19999,USDC,/);
 const ids = files.cointracking.slice(1).filter(Boolean).map(l => l.split(',').pop());
 assert.equal(new Set(ids).size, ids.length, 'Tx-IDs are unique');
@@ -64,7 +64,7 @@ assert.equal(new Set(ids).size, ids.length, 'Tx-IDs are unique');
 // Commas and quotes in descriptions are quoted, never break columns.
 const odd = exportCsv('koinly', buildRows([{ ...entries[0], key: 'k', kind: 'weird, "kind"' }], token));
 assert.equal(odd.split('\r\n')[1].split(',').length >= 12, true);
-assert.match(odd, /"SpotBook: weird, ""kind"""/);
+assert.match(odd, /"SpotTerminal: weird, ""kind"""/);
 
 console.log('tax exports: all formats OK');
 for (const a of TAX_APPS) console.log(`\n--- ${a} ---\n${files[a].slice(0, 5).join('\n')}`);

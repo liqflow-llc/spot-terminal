@@ -49,7 +49,7 @@ async function referencePrice(address) {
 }
 
 const ammChart = new AmmChart({ markets });
-const ledger = new Ledger(); // what moved into / out of SpotBook, for the tax exports
+const ledger = new Ledger(); // what moved into / out of SpotTerminal, for the tax exports
 const orders = new OrderService({
     markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey, referencePrice, ledger,
     jupiter: (path, init) => registry.jupFetch(path, init),
@@ -204,6 +204,12 @@ function requireMarket(req, res) {
 }
 
 const app = express();
+// One address for search engines and links: www.spotterminal.com -> spotterminal.com.
+app.use((req, res, next) => {
+    const host = req.get('host') || '';
+    if (host.startsWith('www.')) return res.redirect(301, `https://${host.slice(4)}${req.originalUrl}`);
+    next();
+});
 app.disable('x-powered-by');
 app.use(express.json({ limit: '64kb' }));
 
@@ -614,7 +620,7 @@ app.get('/api/tax/export', rateLimit('tax', 30, 60_000), (req, res) => {
         const rows = buildRows(ledger.forWallet(wallet), (mint) => registry.display(mint), { year });
         log.info('tax', 'export', { wallet: short(wallet), app: taxApp, year: year || 'all', rows: rows.length });
         res.set('Content-Type', 'text/csv; charset=utf-8');
-        res.set('Content-Disposition', `attachment; filename="spotbook-${taxApp}-${year || 'all-time'}.csv"`);
+        res.set('Content-Disposition', `attachment; filename="spotterminal-${taxApp}-${year || 'all-time'}.csv"`);
         res.set('Cache-Control', 'no-store');
         res.send(exportCsv(taxApp, rows));
     } catch (err) {
@@ -682,6 +688,50 @@ app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 const DEFAULT_DESCRIPTION = 'Trade Solana tokens on on-chain order books with zero trading fees. Limit orders pay out to your wallet automatically; market orders get the best price across Solana.';
 const PAGE_TITLES = { '/account': 'Account', '/terms': 'Terms of Service', '/privacy': 'Privacy Policy' };
+// Pages search engines shouldn't list: personal (account) or a redirect (old orderbook links).
+const NOINDEX = new Set(['/account', '/orderbook']);
+const siteOrigin = (req) => config.publicUrl || `https://${req.get('host')}`;
+
+/** A real page (200) or not (404, so search engines don't list made-up URLs as pages). */
+function pageExists(req) {
+    if (req.path === '/' || PAGE_TITLES[req.path] || NOINDEX.has(req.path)) return true;
+    const m = req.path.match(/^\/trade\/([1-9A-HJ-NP-Za-km-z]{32,44})$/);
+    return !!(m && markets.summary(m[1]));
+}
+
+app.get('/robots.txt', (req, res) => {
+    res.type('text/plain').set('Cache-Control', 'public, max-age=3600').send([
+        'User-agent: *',
+        'Allow: /',
+        'Disallow: /api/',
+        'Disallow: /account',
+        '',
+        `Sitemap: ${siteOrigin(req)}/sitemap.xml`,
+        '',
+    ].join('\n'));
+});
+
+// The home page, the legal pages, and the markets worth finding: both tokens verified and
+// trading, busiest first.
+app.get('/sitemap.xml', (req, res) => {
+    const origin = siteOrigin(req);
+    const today = new Date().toISOString().slice(0, 10);
+    const tradable = markets.allSummaries()
+        .filter(s => s.bidCount + s.askCount > 0)
+        .map(marketView)
+        .filter(v => v.base.verified && v.quote.verified)
+        .sort((a, b) => (b.volume24hUsd ?? 0) - (a.volume24hUsd ?? 0))
+        .slice(0, 1000);
+    const url = (loc, priority, freq) => `  <url><loc>${escapeHtml(origin + loc)}</loc><lastmod>${today}</lastmod><changefreq>${freq}</changefreq><priority>${priority}</priority></url>`;
+    const body = [
+        url('/', '1.0', 'daily'),
+        ...tradable.map((v, i) => url(`/trade/${v.address}`, i < 50 ? '0.8' : '0.5', 'hourly')),
+        url('/terms', '0.2', 'yearly'),
+        url('/privacy', '0.2', 'yearly'),
+    ];
+    res.type('application/xml').set('Cache-Control', 'public, max-age=3600')
+        .send(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${body.join('\n')}\n</urlset>\n`);
+});
 const escapeHtml = (v) => String(v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 function pageMeta(req) {
@@ -705,9 +755,9 @@ function formatNumber(n) {
     return n >= 1 ? n.toLocaleString('en-US', { maximumFractionDigits: n >= 100 ? 2 : 4 }) : n.toPrecision(4);
 }
 
-function renderIndex(html, req) {
+function renderIndex(html, req, { found = true } = {}) {
     const { title, description } = pageMeta(req);
-    const origin = config.publicUrl || `https://${req.get('host')}`;
+    const origin = siteOrigin(req);
     const url = `${origin}${req.path === '/' ? '' : req.path}`;
     const image = `${origin}/og.png`;
     const tags = [
@@ -725,6 +775,19 @@ function renderIndex(html, req) {
         `<meta name="twitter:title" content="${escapeHtml(title)}" />`,
         `<meta name="twitter:description" content="${escapeHtml(description)}" />`,
         `<meta name="twitter:image" content="${escapeHtml(image)}" />`,
+        ...(!found || NOINDEX.has(req.path) ? ['<meta name="robots" content="noindex" />'] : []),
+        // What the site is, for search results (schema.org).
+        ...(req.path === '/' ? [`<script type="application/ld+json">${JSON.stringify({
+            '@context': 'https://schema.org',
+            '@type': 'WebApplication',
+            name: config.brand,
+            url: origin,
+            description: DEFAULT_DESCRIPTION,
+            applicationCategory: 'FinanceApplication',
+            operatingSystem: 'Web',
+            offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+            publisher: { '@type': 'Organization', name: 'LiqFlow LLC', email: 'support@liqflow.app' },
+        }).replace(/</g, '\\u003c')}</script>`] : []),
     ].join('\n    ');
     return html
         .replace(/<title>[^<]*<\/title>/, `<title>${escapeHtml(title)}</title>`)
@@ -747,8 +810,10 @@ if (fs.existsSync(dist)) {
     // Link previews (X, Telegram, Discord...) don't run JavaScript, so each page's title,
     // description and preview tags are filled in here; market links show the pair and price.
     app.get(/^\/(?!api\/).*/, (req, res) => {
+        const found = pageExists(req);
         res.set('Cache-Control', 'no-cache');
-        res.type('html').send(renderIndex(indexHtml(), req));
+        // An unknown URL still gets the app (which shows the default market), but as a 404.
+        res.status(found ? 200 : 404).type('html').send(renderIndex(indexHtml(), req, { found }));
     });
 }
 

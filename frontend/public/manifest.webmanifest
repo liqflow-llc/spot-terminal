@@ -1,6 +1,6 @@
 {
-  "name": "SpotBook",
-  "short_name": "SpotBook",
+  "name": "SpotTerminal",
+  "short_name": "SpotTerminal",
   "description": "Trade Solana tokens on order books with zero trading fees.",
   "start_url": "/",
   "display": "standalone",
