@@ -33,7 +33,8 @@ const PLACE_CU = 400_000;
 const CLAIM_CU = 120_000;
 const CANCEL_CU = 300_000;
 const PRIORITY_MICROLAMPORTS = 50_000;
-const PREPARE_TTL_MS = 3 * 60 * 1000;
+const DEFAULT_WINDOW_MS = 5 * 60 * 1000; // time to approve in the wallet (see signWindow.js)
+const DURABLE_CONFIRM_TIMEOUT_MS = 60_000;
 const NONCES_PER_SETUP = 2;
 const CREATE_MARKET_CU = 100_000;
 const MAX_SLIPPAGE_BPS = 1000;
@@ -49,6 +50,24 @@ export const PRICE_WARN_DEVIATION = 0.05;
 export function adverseDeviation(side, price, reference) {
     if (!(reference > 0) || !(price > 0)) return null;
     return side === 'buy' ? price / reference - 1 : 1 - price / reference;
+}
+
+const minutes = (ms) => (ms < 60_000 ? `${Math.round(ms / 1000)} seconds` : `${Math.round(ms / 60_000)} minute${Math.round(ms / 60_000) === 1 ? '' : 's'}`);
+
+/** What a failed send means for the user; null if it isn't one we can explain. */
+function explainSendError(err) {
+    const msg = err?.message || '';
+    if (/blockhash not found|block height exceeded|has expired/i.test(msg)) {
+        return 'This took too long to approve and expired, so nothing was sent. Please try again.';
+    }
+    if (/insufficient (funds|lamports)|no record of a prior credit/i.test(msg)) {
+        return 'Not enough SOL in your wallet to pay for this transaction (network fee and any deposit). Nothing was sent.';
+    }
+    // The pre-send simulation failed: the chain changed between prepare and approval.
+    if (/simulation failed/i.test(msg)) {
+        return "This can't go through anymore: something changed since it was prepared (for example the order filled, or a balance moved). Nothing was sent. Please try again.";
+    }
+    return null;
 }
 
 export class UserError extends Error {
@@ -99,7 +118,7 @@ function describePending(p) {
  * A Jupiter Swap API v2 /build response as an unsigned v0 transaction paid by the wallet.
  * Jupiter includes each lookup table's addresses, so no extra RPC calls are needed.
  */
-export function buildJupiterTransaction(built, payer) {
+export function buildJupiterTransaction(built, payer, window = null) {
     const toIx = (i) => new TransactionInstruction({
         programId: new PublicKey(i.programId),
         keys: i.accounts.map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: a.isSigner, isWritable: a.isWritable })),
@@ -122,9 +141,13 @@ export function buildJupiterTransaction(built, payer) {
         key: new PublicKey(key),
         state: { deactivationSlot: 2n ** 64n - 1n, lastExtendedSlot: 0, lastExtendedSlotStartIndex: 0, addresses: addresses.map(a => new PublicKey(a)) },
     }));
-    const blockhash = bs58.encode(Uint8Array.from(built.blockhashWithMetadata.blockhash));
+    // On a sign-window nonce (window = { pool, lease }) the nonce advance must come first.
+    if (window) instructions.unshift(window.pool.advanceIx(window.lease));
+    const blockhash = window ? window.lease.value : bs58.encode(Uint8Array.from(built.blockhashWithMetadata.blockhash));
     const message = new TransactionMessage({ payerKey: payer, recentBlockhash: blockhash, instructions }).compileToV0Message(lookupTables);
-    return new VersionedTransaction(message);
+    const tx = new VersionedTransaction(message);
+    tx.instructionsForCheck = instructions;
+    return tx;
 }
 
 /**
@@ -186,7 +209,9 @@ function parseMint(mint) {
 }
 
 export class OrderService {
-    constructor({ markets, store, keeperPubkey, referencePrice = null, jupiter = null, usdPrices = null }) {
+    constructor({ markets, store, keeperPubkey, referencePrice = null, jupiter = null, usdPrices = null, signWindow = null }) {
+        this.signWindow = signWindow; // SignWindowPool: 5 minutes to approve instead of ~1 (null: ~1 minute)
+        this.windowMs = signWindow?.windowMs ?? DEFAULT_WINDOW_MS;
         this.markets = markets;
         this.usdPrices = usdPrices; // async (mints) => { mint: usd } (to value transaction fees)
         this.jupiter = jupiter; // (pathAndQuery, { method, body }) => Promise<json>, rate limited
@@ -197,8 +222,93 @@ export class OrderService {
         this.quoteCache = new Map(); // Jupiter quotes, briefly, so preview + order don't double-fetch
         setInterval(() => {
             const now = Date.now();
-            for (const [id, p] of this.pending) if (now - p.createdAt > PREPARE_TTL_MS) this.pending.delete(id);
-        }, 30_000).unref();
+            for (const [id, p] of this.pending) if (now - p.createdAt > this.windowMs + 60_000) this.dropPending(id);
+        }, 15_000).unref();
+    }
+
+    /** Forget a prepared request; its window nonces are voided before reuse. */
+    dropPending(id) {
+        const p = this.pending.get(id);
+        if (!p) return;
+        this.pending.delete(id);
+        this.releaseLives(p);
+    }
+
+    /** The user rejected the request in their wallet: free what it was holding right away. */
+    abandon({ id }) {
+        if (typeof id === 'string' && this.pending.has(id)) {
+            log.info('orders', 'abandoned', { wallet: short(this.pending.get(id).wallet), kind: this.pending.get(id).kind });
+            this.dropPending(id);
+        }
+        return { ok: true };
+    }
+
+    /**
+     * A wallet asking for a new order while an earlier one is still unsigned: the earlier request's
+     * payout account goes to the new one (people place one order at a time; the old request can no
+     * longer be sent). Returns whether anything was freed.
+     */
+    supersedeUnsigned(wallet) {
+        let freed = false;
+        for (const [id, p] of this.pending) {
+            if (p.wallet === wallet && (p.kind === 'order' || p.kind === 'smart')) {
+                this.dropPending(id);
+                freed = true;
+            }
+        }
+        if (freed) log.info('orders', 'superseded_unsigned', { wallet: short(wallet) });
+        return freed;
+    }
+
+    releaseLives(p) {
+        for (const life of p.lives || []) if (life?.lease) this.signWindow?.release(life.lease, !!life.landed);
+    }
+
+    /**
+     * Finish a legacy transaction the user will sign: on a sign-window nonce when there is one
+     * (5 minutes to approve), else on its recent blockhash (~1 minute). Signs with `signers`
+     * (generated account keypairs) once the message is final. Returns how to confirm it.
+     */
+    finishUserTx(tx, walletPk, signers = []) {
+        const lease = this.signWindow?.acquire(walletPk.toBase58()) || null;
+        if (lease) {
+            const { recentBlockhash, lastValidBlockHeight } = tx;
+            tx.nonceInfo = this.signWindow.nonceInfo(lease);
+            tx.recentBlockhash = lease.value;
+            const message = tx.compileMessage();
+            if (message.serialize().length + 1 + 64 * message.header.numRequiredSignatures <= 1232) {
+                if (signers.length) tx.partialSign(...signers);
+                this.signWindow.signLegacy(tx, lease);
+                return { lease };
+            }
+            // The nonce advance and second signature don't fit: this one gets the short window.
+            log.info('sign-window', 'too_big_for_window', { instructions: tx.instructions.length });
+            tx.nonceInfo = null;
+            tx.recentBlockhash = recentBlockhash;
+            tx.lastValidBlockHeight = lastValidBlockHeight;
+            this.signWindow.unuse(lease);
+        }
+        if (signers.length) tx.partialSign(...signers);
+        return { blockhash: tx.recentBlockhash, lastValidBlockHeight: tx.lastValidBlockHeight };
+    }
+
+    /**
+     * A Jupiter /build response as a v0 transaction for the wallet, on a sign-window nonce when it
+     * fits. Returns { tx, life } or null when it doesn't fit in a transaction at all.
+     */
+    jupiterUserTx(built, walletPk) {
+        const lease = this.signWindow?.acquire(walletPk.toBase58()) || null;
+        if (lease) {
+            const tx = buildJupiterTransaction(built, walletPk, { pool: this.signWindow, lease });
+            if (fitsInPacket(tx)) {
+                this.signWindow.signVersioned(tx, lease, tx.instructionsForCheck);
+                return { tx, life: { lease } };
+            }
+            this.signWindow.unuse(lease);
+        }
+        const tx = buildJupiterTransaction(built, walletPk);
+        if (!fitsInPacket(tx)) return null;
+        return { tx, life: { blockhash: tx.message.recentBlockhash, lastValidBlockHeight: built.blockhashWithMetadata.lastValidBlockHeight } };
     }
 
     // ---------- context ----------
@@ -270,7 +380,9 @@ export class OrderService {
         return this.prepareNonceSetup(parseWallet(wallet));
     }
 
-    async prepareNonceSetup(walletPk) {
+    // From an order request (window: false) the transaction is only a preview: the UI asks for the
+    // setup again via prepareSetup once the user agrees, so no sign-window nonce is held for it.
+    async prepareNonceSetup(walletPk, { window = true } = {}) {
         const rent = await connection.getMinimumBalanceForRentExemption(NONCE_ACCOUNT_LENGTH);
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
         const tx = new Transaction({ feePayer: walletPk, blockhash, lastValidBlockHeight });
@@ -284,11 +396,16 @@ export class OrderService {
             }).instructions);
         }
         // The nonce keypairs only sign their own creation; control rests with the wallet (authority).
-        tx.partialSign(...keypairs);
+        let life;
+        if (window) life = this.finishUserTx(tx, walletPk, keypairs);
+        else {
+            tx.partialSign(...keypairs);
+            life = { blockhash, lastValidBlockHeight };
+        }
         const id = crypto.randomUUID();
         this.pending.set(id, {
             kind: 'setup', wallet: walletPk.toBase58(), createdAt: Date.now(),
-            messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight,
+            messages: [tx.serializeMessage()], lives: [life],
             nonceAddresses: keypairs.map(k => k.publicKey.toBase58()),
         });
         return {
@@ -313,8 +430,9 @@ export class OrderService {
 
         await this.checkPriceRisk(market, side, tokenPrice, acknowledgePriceRisk);
 
-        const ctx = await this.loadContext(walletPk, market);
-        if (!ctx.freeNonces.length) return this.prepareNonceSetup(walletPk);
+        let ctx = await this.loadContext(walletPk, market);
+        if (!ctx.freeNonces.length && this.supersedeUnsigned(walletPk.toBase58())) ctx = await this.loadContext(walletPk, market);
+        if (!ctx.freeNonces.length) return this.prepareNonceSetup(walletPk, { window: false });
 
         const isBid = side === 'buy';
         const baseAtoms = toAtoms(size, ctx.baseDecimals);
@@ -380,10 +498,10 @@ export class OrderService {
             place.add(...SystemProgram.createNonceAccount({
                 fromPubkey: walletPk, noncePubkey: replenish.publicKey, authorizedPubkey: walletPk, lamports: rent,
             }).instructions);
-            place.partialSign(replenish);
         }
 
         await this.simulateOrThrow(place, replenish ? [replenish] : []);
+        const placeLife = this.finishUserTx(place, walletPk, replenish ? [replenish] : []);
 
         // ----- claim transaction (durable nonce, keeper pays the fee) -----
         const nonce = ctx.freeNonces[0];
@@ -420,7 +538,7 @@ export class OrderService {
         this.pending.set(id, {
             kind: 'order', wallet: order.wallet, createdAt: Date.now(), order,
             messages: [place.serializeMessage(), claim.serializeMessage()],
-            blockhash, lastValidBlockHeight,
+            lives: [placeLife, null], // the claim is the keeper's to send, later
             replenishNonce: replenish?.publicKey.toBase58() || null,
         });
         return {
@@ -516,21 +634,63 @@ export class OrderService {
         return tx;
     }
 
-    async send(tx, { blockhash, lastValidBlockHeight }) {
+    /**
+     * Send one signed transaction and wait until it has landed (returns its signature) or
+     * certainly never will (throws). life: how it was built (finishUserTx / jupiterUserTx).
+     */
+    async send(tx, life) {
+        if (life?.lease) return this.sendDurable(tx, life);
         let signature, res;
         try {
             signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
-            res = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+            res = await connection.confirmTransaction({ signature, blockhash: life.blockhash, lastValidBlockHeight: life.lastValidBlockHeight }, 'confirmed');
         } catch (err) {
-            // A transaction is only valid for ~60-90 s after it was prepared; approving it in the
-            // wallet took longer than that. Nothing happened on chain.
-            if (/blockhash not found|block height exceeded|has expired/i.test(err?.message || '')) {
-                throw new UserError('This took too long to approve and expired, so nothing was sent. Please try again.');
-            }
+            const explained = explainSendError(err);
+            if (explained) throw Object.assign(new UserError(explained), { cause: err });
             throw err;
         }
         if (res.value.err) throw new UserError(`Transaction failed: ${JSON.stringify(res.value.err)}`);
         return signature;
+    }
+
+    /**
+     * A transaction on a sign-window nonce never expires by itself, so "not confirmed yet" is not
+     * an answer: if it hasn't landed in time we void its nonce, after which it can't, and then
+     * check once more whether it landed first.
+     */
+    async sendDurable(tx, life) {
+        const { lease } = life;
+        if (lease.done) throw new UserError('A newer request replaced this one, so nothing was sent. Please try again.');
+        let signature;
+        try {
+            signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 5 });
+        } catch (err) {
+            // Rejected before it was broadcast: nothing to wait for. (The nonce is voided on release.)
+            const explained = explainSendError(err);
+            if (explained) throw Object.assign(new UserError(explained), { cause: err });
+            throw err;
+        }
+        const confirmed = await Promise.race([
+            connection.confirmTransaction({ signature, nonceAccountPubkey: new PublicKey(lease.address), nonceValue: lease.value, minContextSlot: 0 }, 'confirmed')
+                .then(res => ({ res }), err => ({ err })),
+            new Promise(r => setTimeout(() => r(null), DURABLE_CONFIRM_TIMEOUT_MS)),
+        ]);
+        if (confirmed?.res) {
+            life.landed = true; // landed: its nonce advanced, even if the transaction failed
+            if (confirmed.res.value.err) throw new UserError(`Transaction failed: ${JSON.stringify(confirmed.res.value.err)}`);
+            return signature;
+        }
+        if (!confirmed) await this.signWindow.voidNow(lease).catch(err => log.warn('sign-window', 'void_failed', { msg: errorDetail(err) }));
+        const status = (await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })).value[0];
+        if (status && !status.err && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) {
+            life.landed = true;
+            return signature;
+        }
+        if (status?.err) {
+            life.landed = true;
+            throw new UserError(`Transaction failed: ${JSON.stringify(status.err)}`);
+        }
+        throw new UserError('The network did not confirm this in time. It has been cancelled, so nothing happened. Please try again.');
     }
 
     /** Send signed transactions; logs one line per outcome so problems show up in the logs. */
@@ -538,7 +698,11 @@ export class OrderService {
         const pending = this.pending.get(body?.id);
         const started = Date.now();
         try {
-            const result = await this.submitInner(body);
+            // Window nonces are finished with once the request is used up; a refused submission
+            // (wrong signature, say) leaves it pending so the user can still approve it properly.
+            const result = await this.submitInner(body).finally(() => {
+                if (pending && !this.pending.has(body.id)) this.releaseLives(pending);
+            });
             // Our own transaction just changed the market: re-read it now so the book and the
             // wallet's order list are right on the next refresh, not one poll later.
             const market = pending?.order?.market || pending?.market;
@@ -564,23 +728,26 @@ export class OrderService {
 
     async submitInner({ id, signed }) {
         const pending = this.pending.get(id);
-        if (!pending) throw new UserError('This request expired, please try again');
+        if (!pending) throw new UserError('This request has expired or was already sent, so nothing more was sent. Please refresh and try again if needed.');
         const txs = this.verifySigned(pending, signed);
         this.pending.delete(id);
+        if (pending.lives?.some(l => l?.lease) && Date.now() - pending.createdAt > this.windowMs) {
+            throw new UserError(`This wasn't approved within ${minutes(this.windowMs)}, so it expired and nothing was sent. Please try again.`);
+        }
 
         if (pending.kind === 'setup') {
-            const signature = await this.send(txs[0], pending);
+            const signature = await this.send(txs[0], pending.lives[0]);
             pending.nonceAddresses.forEach(a => this.store.addNonce(a, pending.wallet));
             return { ok: true, signature };
         }
 
         if (pending.kind === 'swap') {
-            const signature = await this.send(txs[0], pending);
+            const signature = await this.send(txs[0], pending.lives[0]);
             return { ok: true, signature, ...pending.result };
         }
 
         if (pending.kind === 'createMarket') {
-            const signature = await this.send(txs[0], pending);
+            const signature = await this.send(txs[0], pending.lives[0]);
             await this.markets.refresh(pending.market);
             return { ok: true, signature, market: pending.market };
         }
@@ -588,19 +755,19 @@ export class OrderService {
         if (pending.kind === 'closePayout') {
             const busy = this.store.noncesInUse(pending.wallet);
             if (pending.nonceAddresses.some(a => busy.has(a))) throw new UserError('An order started using these payout accounts, please try the refund again.');
-            const signature = await this.send(txs[0], pending);
+            const signature = await this.send(txs[0], pending.lives[0]);
             pending.nonceAddresses.forEach(a => this.store.removeNonce(a));
             return { ok: true, signature, refundedSol: pending.refundLamports / 1e9 };
         }
 
         if (pending.kind === 'cancelAll') {
-            const signature = await this.send(txs[0], pending);
+            const signature = await this.send(txs[0], pending.lives[0]);
             for (const orderId of pending.orderIds) this.store.update(orderId, { status: 'cancelled', cancelSignature: signature });
             return { ok: true, signature, cancelled: pending.orderIds.length };
         }
 
         if (pending.kind === 'cancel' || pending.kind === 'withdraw') {
-            const signature = await this.send(txs[0], pending);
+            const signature = await this.send(txs[0], pending.lives[0]);
             if (pending.orderId) this.store.update(pending.orderId, { status: 'cancelled', cancelSignature: signature });
             return { ok: true, signature };
         }
@@ -610,14 +777,14 @@ export class OrderService {
             const [swapTx, ...orderTxs] = txs;
             let swapSignature;
             try {
-                swapSignature = await this.send(swapTx, pending.swap);
+                swapSignature = await this.send(swapTx, pending.lives[0]);
             } catch (err) {
                 throw new UserError(`The instant fill didn't go through (${err.message.slice(0, 100)}), so nothing was placed. Please try again.`);
             }
             const filledNow = { swapSignature, swap: pending.swap.result };
             if (!pending.order) return { ok: true, signature: swapSignature, ...filledNow };
             try {
-                const placed = await this.submitOrderTxs(pending, orderTxs);
+                const placed = await this.submitOrderTxs(pending, orderTxs, pending.lives[1]);
                 return { ...placed, ...filledNow, restingSize: Number(pending.order.baseAtoms) / 10 ** pending.order.baseDecimals };
             } catch (err) {
                 // The instant part already happened: report it, and that the rest wasn't placed.
@@ -626,11 +793,11 @@ export class OrderService {
             }
         }
 
-        return this.submitOrderTxs(pending, txs);
+        return this.submitOrderTxs(pending, txs, pending.lives[0]);
     }
 
     /** Send an order's place transaction (its pre-signed payout was recorded first). */
-    async submitOrderTxs(pending, txs) {
+    async submitOrderTxs(pending, txs, life) {
         // Record the claim before sending so a crash can never lose it.
         if (!this.store.noncesFor(pending.wallet).includes(pending.order.nonce)) {
             throw new UserError('Your payout accounts were refunded, please place the order again.');
@@ -650,7 +817,7 @@ export class OrderService {
         });
         let signature;
         try {
-            signature = await this.send(place, pending);
+            signature = await this.send(place, life);
         } catch (err) {
             this.store.update(order.id, { status: 'failed', error: err.message });
             if (replaced) this.store.update(replaced.id, { status: 'open' });
@@ -688,8 +855,11 @@ export class OrderService {
         if (!(limit > 0)) throw new UserError('Enter a price above zero');
         if (!this.jupiter) return this.prepareOrder(params);
         // A wallet without free payout accounts needs the setup first: say so before any Jupiter calls.
-        const spoken = this.noncesSpokenFor(walletPk.toBase58());
-        if (!this.store.noncesFor(walletPk.toBase58()).some(a => !spoken.has(a))) return this.prepareNonceSetup(walletPk);
+        const hasFree = () => {
+            const spoken = this.noncesSpokenFor(walletPk.toBase58());
+            return this.store.noncesFor(walletPk.toBase58()).some(a => !spoken.has(a));
+        };
+        if (!hasFree() && !(this.supersedeUnsigned(walletPk.toBase58()) && hasFree())) return this.prepareNonceSetup(walletPk, { window: false });
         const s = this.markets.summary(market);
         if (!s) throw new UserError('Unknown market');
         await this.checkPriceRisk(market, side, limit, acknowledgePriceRisk);
@@ -723,60 +893,63 @@ export class OrderService {
         const reserve = isNativeMint(spendMint) ? 20_000_000n : 0n;
         if (take.inAtoms + restLock + reserve > have) throw new UserError('Insufficient balance for this order.');
 
-        const swapTx = buildJupiterTransaction(take.quote, walletPk);
-        if (!fitsInPacket(swapTx)) return this.prepareOrder({ ...params, acknowledgePriceRisk: true });
-        await this.simulateOrThrow(swapTx);
-        const swapResult = {
-            inAmount: Number(take.inAtoms) / 10 ** (isBuy ? s.quoteDecimals : s.baseDecimals),
-            outAmount: Number(take.outAtoms) / 10 ** (isBuy ? s.baseDecimals : s.quoteDecimals),
-        };
-        swapResult.price = isBuy ? swapResult.inAmount / swapResult.outAmount : swapResult.outAmount / swapResult.inAmount;
-        // Including the transaction fee, as the limit check does.
-        swapResult.allInPrice = isBuy
-            ? (swapResult.inAmount + take.feeQuote) / swapResult.outAmount
-            : (swapResult.outAmount - take.feeQuote) / swapResult.inAmount;
-        const swapPart = {
-            message: Buffer.from(swapTx.message.serialize()),
-            b64: Buffer.from(swapTx.serialize()).toString('base64'),
-            blockhash: swapTx.message.recentBlockhash,
-            lastValidBlockHeight: take.quote.blockhashWithMetadata.lastValidBlockHeight,
-            result: swapResult,
-        };
+        const built = this.jupiterUserTx(take.quote, walletPk);
+        if (!built) return this.prepareOrder({ ...params, acknowledgePriceRisk: true });
+        const { tx: swapTx, life: swapLife } = built;
+        // The swap is already signed by the keeper (its window nonce): void it if we stop here.
+        try {
+            await this.simulateOrThrow(swapTx);
+            const swapResult = {
+                inAmount: Number(take.inAtoms) / 10 ** (isBuy ? s.quoteDecimals : s.baseDecimals),
+                outAmount: Number(take.outAtoms) / 10 ** (isBuy ? s.baseDecimals : s.quoteDecimals),
+            };
+            swapResult.price = isBuy ? swapResult.inAmount / swapResult.outAmount : swapResult.outAmount / swapResult.inAmount;
+            // Including the transaction fee, as the limit check does.
+            swapResult.allInPrice = isBuy
+                ? (swapResult.inAmount + take.feeQuote) / swapResult.outAmount
+                : (swapResult.outAmount - take.feeQuote) / swapResult.inAmount;
 
-        let orderPrepared = null, orderPending = null;
-        if (restAtoms > 0n) {
-            orderPrepared = await this.prepareOrder({
-                wallet, market, side, price, size: atomsToDecimal(restAtoms, s.baseDecimals), acknowledgePriceRisk: true, expiresInSeconds,
+            let orderPrepared = null, orderPending = null;
+            if (restAtoms > 0n) {
+                orderPrepared = await this.prepareOrder({
+                    wallet, market, side, price, size: atomsToDecimal(restAtoms, s.baseDecimals), acknowledgePriceRisk: true, expiresInSeconds,
+                });
+                if (orderPrepared.step === 'setup') { // payout accounts first, then re-prepare
+                    this.signWindow?.release(swapLife.lease, false);
+                    return orderPrepared;
+                }
+                orderPending = this.pending.get(orderPrepared.id);
+                this.pending.delete(orderPrepared.id); // its window nonce moves to the combined request
+            }
+
+            const id = crypto.randomUUID();
+            this.pending.set(id, {
+                kind: 'smart', wallet: walletPk.toBase58(), market, createdAt: Date.now(),
+                messages: [Buffer.from(swapTx.message.serialize()), ...(orderPending?.messages || [])],
+                versionFlags: [true, ...(orderPending?.messages || []).map(() => false)],
+                lives: [swapLife, ...(orderPending?.lives || [])],
+                swap: { result: swapResult },
+                order: orderPending?.order || null,
+                replenishNonce: orderPending?.replenishNonce || null,
             });
-            if (orderPrepared.step === 'setup') return orderPrepared; // payout accounts first, then re-prepare
-            orderPending = this.pending.get(orderPrepared.id);
-            this.pending.delete(orderPrepared.id);
+            return {
+                step: 'sign',
+                id,
+                versionFlags: [true, ...(orderPrepared?.transactions || []).map(() => false)],
+                transactions: [Buffer.from(swapTx.serialize()).toString('base64'), ...(orderPrepared?.transactions || [])],
+                summary: {
+                    title: 'Limit order',
+                    now: swapResult,
+                    restSize: Number(restAtoms) / 10 ** s.baseDecimals,
+                    limit,
+                    networkFee: take.feeQuote,
+                    venues: [...new Set((take.quote.routePlan || []).map(r => r.swapInfo?.label).filter(Boolean))],
+                },
+            };
+        } catch (err) {
+            if (swapLife.lease) this.signWindow.release(swapLife.lease, false);
+            throw err;
         }
-
-        const id = crypto.randomUUID();
-        this.pending.set(id, {
-            kind: 'smart', wallet: walletPk.toBase58(), market, createdAt: Date.now(),
-            messages: [swapPart.message, ...(orderPending?.messages || [])],
-            versionFlags: [true, ...(orderPending?.messages || []).map(() => false)],
-            swap: { blockhash: swapPart.blockhash, lastValidBlockHeight: swapPart.lastValidBlockHeight, result: swapResult },
-            order: orderPending?.order || null,
-            blockhash: orderPending?.blockhash, lastValidBlockHeight: orderPending?.lastValidBlockHeight,
-            replenishNonce: orderPending?.replenishNonce || null,
-        });
-        return {
-            step: 'sign',
-            id,
-            versionFlags: [true, ...(orderPrepared?.transactions || []).map(() => false)],
-            transactions: [swapPart.b64, ...(orderPrepared?.transactions || [])],
-            summary: {
-                title: 'Limit order',
-                now: swapResult,
-                restSize: Number(restAtoms) / 10 ** s.baseDecimals,
-                limit,
-                networkFee: take.feeQuote,
-                venues: [...new Set((take.quote.routePlan || []).map(r => r.swapInfo?.label).filter(Boolean))],
-            },
-        };
     }
 
     /**
@@ -912,28 +1085,33 @@ export class OrderService {
         const walletPk = parseWallet(wallet);
         // Long multi-hop routes can come out bigger than a transaction allows; then ask again for a
         // route that touches fewer accounts (usually a hair worse price, shown before signing).
-        let quote, summary, tx;
+        let quote, summary, built = null;
         for (const maxAccounts of [null, 40, 28]) {
             ({ quote, summary } = await this.quoteSwap({ market, side, amount, slippageBps, wallet: walletPk.toBase58(), maxAccounts }));
-            tx = buildJupiterTransaction(quote, walletPk);
-            if (fitsInPacket(tx)) break;
+            built = this.jupiterUserTx(quote, walletPk);
+            if (built) break;
             log.info('orders', 'swap_route_too_big', { maxAccounts, hops: quote.routePlan?.length });
-            tx = null;
         }
-        if (!tx) throw new UserError('Could not fit this trade in one transaction. Try a smaller amount.');
-        // Judge the WORST price the order allows (slippage included), not the hoped-for one.
-        const off = Math.max(summary.deviation ?? -1, summary.priceImpact);
-        if (!acknowledgePriceRisk && off > PRICE_WARN_DEVIATION) {
-            const err = new UserError(`This market order could fill up to ${(off * 100).toFixed(1)}% worse than the market price. Confirm the price warning to place it anyway.`);
-            err.code = 'PRICE_DEVIATION';
+        if (!built) throw new UserError('Could not fit this trade in one transaction. Try a smaller amount.');
+        const { tx, life } = built;
+        try {
+            // Judge the WORST price the order allows (slippage included), not the hoped-for one.
+            const off = Math.max(summary.deviation ?? -1, summary.priceImpact);
+            if (!acknowledgePriceRisk && off > PRICE_WARN_DEVIATION) {
+                const err = new UserError(`This market order could fill up to ${(off * 100).toFixed(1)}% worse than the market price. Confirm the price warning to place it anyway.`);
+                err.code = 'PRICE_DEVIATION';
+                throw err;
+            }
+            await this.simulateOrThrow(tx);
+        } catch (err) {
+            if (life.lease) this.signWindow.release(life.lease, false); // keeper-signed: void before reuse
             throw err;
         }
-        await this.simulateOrThrow(tx);
         const id = crypto.randomUUID();
         this.pending.set(id, {
             kind: 'swap', versioned: true, wallet: walletPk.toBase58(), createdAt: Date.now(),
             messages: [Buffer.from(tx.message.serialize())],
-            blockhash: tx.message.recentBlockhash, lastValidBlockHeight: quote.blockhashWithMetadata.lastValidBlockHeight,
+            lives: [life],
             result: { inAmount: summary.inAmount, outAmount: summary.outAmount, price: summary.price },
         });
         return {
@@ -969,7 +1147,6 @@ export class OrderService {
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
         const tx = new Transaction({ feePayer: walletPk, blockhash, lastValidBlockHeight });
         tx.add(...priorityIxs(CREATE_MARKET_CU), ...ixs);
-        tx.partialSign(marketKeypair);
 
         // Exact cost (rent for the market and its two vaults, plus fees) from the simulation.
         const sim = await connection.simulateTransaction(new VersionedTransaction(tx.compileMessage()), {
@@ -985,11 +1162,12 @@ export class OrderService {
         }
         const costLamports = (walletInfo?.lamports ?? 0) - (sim.value.accounts?.[0]?.lamports ?? walletInfo?.lamports ?? 0);
 
+        const life = this.finishUserTx(tx, walletPk, [marketKeypair]);
         const id = crypto.randomUUID();
         const market = marketKeypair.publicKey.toBase58();
         this.pending.set(id, {
             kind: 'createMarket', wallet: walletPk.toBase58(), createdAt: Date.now(),
-            messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight, market,
+            messages: [tx.serializeMessage()], lives: [life], market,
         });
         return {
             step: 'sign',
@@ -1048,10 +1226,11 @@ export class OrderService {
         }
         await this.simulateOrThrow(tx);
         const refundLamports = closable.reduce((s, a) => s + a.lamports, 0);
+        const life = this.finishUserTx(tx, walletPk);
         const id = crypto.randomUUID();
         this.pending.set(id, {
             kind: 'closePayout', wallet: walletPk.toBase58(), createdAt: Date.now(),
-            messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight,
+            messages: [tx.serializeMessage()], lives: [life],
             nonceAddresses: closable.map(a => a.address), refundLamports,
         });
         return {
@@ -1087,8 +1266,9 @@ export class OrderService {
             }));
         }
         await this.appendWithdrawAll(tx, walletPk, ctx, { excludeOrderId: order.id });
+        const life = this.finishUserTx(tx, walletPk);
         const id = crypto.randomUUID();
-        this.pending.set(id, { kind: 'cancel', orderId, market: order.market, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight });
+        this.pending.set(id, { kind: 'cancel', orderId, market: order.market, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], lives: [life] });
         return { step: 'sign', id, transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')], summary: { title: 'Cancel order', detail: 'Cancels the order and returns its funds to your wallet.' } };
     }
 
@@ -1106,7 +1286,8 @@ export class OrderService {
         if (!(tokenPrice > 0)) throw new UserError('Enter a price above zero');
         await this.checkPriceRisk(old.market, old.side, tokenPrice, acknowledgePriceRisk);
 
-        const ctx = await this.loadContext(walletPk, old.market);
+        let ctx = await this.loadContext(walletPk, old.market);
+        if (!ctx.freeNonces.some(n => n.address !== old.nonce) && this.supersedeUnsigned(walletPk.toBase58())) ctx = await this.loadContext(walletPk, old.market);
         const resting = this.markets.allOrders(old.market).find(o => o.sequenceNumber.toString() === old.sequenceNumber);
         if (!resting) throw new UserError('This order has already filled or left the book.');
         if (old.lastValidSlot && this.markets.slot > old.lastValidSlot) throw new UserError('This order has expired; withdraw it instead.');
@@ -1172,6 +1353,7 @@ export class OrderService {
         if (oldProceeds > 0n) tx.add(withdrawIx({ trader: walletPk, market: old.market, mint: proceedsMint, tokenProgram: proceedsProgram, amountAtoms: oldProceeds }));
         if (isNativeMint(ctx.baseMint) || isNativeMint(ctx.quoteMint)) tx.add(unwrapSolIx({ owner: walletPk }));
         await this.simulateOrThrow(tx);
+        const life = this.finishUserTx(tx, walletPk);
 
         const claim = this.buildClaim({ walletPk, nonce, market: old.market, proceedsMint, proceedsProgram, claimAtoms: econ.claimAtoms });
         const id = crypto.randomUUID();
@@ -1193,7 +1375,7 @@ export class OrderService {
         this.pending.set(id, {
             kind: 'order', wallet: order.wallet, createdAt: Date.now(), order, replaces: old.id,
             messages: [tx.serializeMessage(), claim.serializeMessage()],
-            blockhash, lastValidBlockHeight, replenishNonce: null,
+            lives: [life, null], replenishNonce: null,
         });
         return {
             step: 'sign',
@@ -1225,10 +1407,11 @@ export class OrderService {
             }));
         }
         await this.appendWithdrawAll(tx, walletPk, ctx, { excludeOrderId: new Set(batch.map(o => o.id)) });
+        const life = this.finishUserTx(tx, walletPk);
         const id = crypto.randomUUID();
         this.pending.set(id, {
             kind: 'cancelAll', orderIds: batch.map(o => o.id), market, wallet: walletPk.toBase58(), createdAt: Date.now(),
-            messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight,
+            messages: [tx.serializeMessage()], lives: [life],
         });
         return {
             step: 'sign', id,
@@ -1247,8 +1430,9 @@ export class OrderService {
         tx.add(...priorityIxs(CANCEL_CU));
         const added = await this.appendWithdrawAll(tx, walletPk, ctx);
         if (!added) throw new UserError('Nothing to withdraw on this market');
+        const life = this.finishUserTx(tx, walletPk);
         const id = crypto.randomUUID();
-        this.pending.set(id, { kind: 'withdraw', market, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight });
+        this.pending.set(id, { kind: 'withdraw', market, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], lives: [life] });
         return { step: 'sign', id, transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')], summary: { title: 'Withdraw to wallet', detail: 'Moves your filled proceeds and leftovers back to your wallet.' } };
     }
 

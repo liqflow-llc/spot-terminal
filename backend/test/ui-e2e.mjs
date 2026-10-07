@@ -15,6 +15,7 @@ import puppeteer from 'puppeteer-core';
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, Transaction, sendAndConfirmTransaction } from '@solana/web3.js';
 import * as spl from '@solana/spl-token';
 import { Market, createSwapInstruction } from '@bonasa-tech/manifest-sdk';
+import { installMockWallet } from './lib/mockWallet.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CHROME = process.argv[2] || '/usr/bin/google-chrome';
@@ -82,71 +83,13 @@ try {
     page.on('pageerror', e => errors.push(e.message));
     page.on('console', m => m.type() === 'error' && errors.push(`console: ${m.text()}`));
 
-    // The page asks Node to sign: the mock wallet holds no key itself.
-    await page.exposeFunction('__mockSign', (b64) => {
-        const tx = Transaction.from(Buffer.from(b64, 'base64'));
-        tx.partialSign(user);
-        return tx.serialize({ requireAllSignatures: false }).toString('base64');
-    });
+    await installMockWallet(page, user); // signs in Node; see lib/mockWallet.mjs
     await page.evaluateOnNewDocument(() => {
         const realFetch = window.fetch.bind(window);
         window.fetch = (url, opts) => (window.__refStub != null && String(url).endsWith('/reference')
             ? Promise.resolve(new Response(JSON.stringify({ price: window.__refStub, source: 'Jupiter', at: Date.now() }), { headers: { 'Content-Type': 'application/json' } }))
             : realFetch(url, opts));
     });
-    await page.evaluateOnNewDocument((address, pubkeyBytes) => {
-        const b64ToBytes = (b64) => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-        const bytesToB64 = (bytes) => btoa(String.fromCharCode(...bytes));
-        const listeners = { change: new Set() };
-        const account = {
-            address,
-            publicKey: new Uint8Array(pubkeyBytes),
-            chains: ['solana:mainnet', 'solana:localnet'],
-            features: ['solana:signTransaction', 'solana:signAndSendTransaction'],
-        };
-        const wallet = {
-            version: '1.0.0',
-            name: 'Mock Wallet',
-            icon: 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxIDEiPjwvc3ZnPg==',
-            chains: ['solana:mainnet', 'solana:localnet'],
-            accounts: [],
-            features: {
-                'standard:connect': {
-                    version: '1.0.0',
-                    connect: async () => {
-                        wallet.accounts = [account];
-                        listeners.change.forEach(fn => fn({ accounts: wallet.accounts }));
-                        return { accounts: wallet.accounts };
-                    },
-                },
-                'standard:disconnect': { version: '1.0.0', disconnect: async () => { wallet.accounts = []; } },
-                'standard:events': {
-                    version: '1.0.0',
-                    on: (event, fn) => { listeners[event]?.add(fn); return () => listeners[event]?.delete(fn); },
-                },
-                'solana:signTransaction': {
-                    version: '1.0.0',
-                    supportedTransactionVersions: ['legacy', 0],
-                    signTransaction: async (...inputs) => {
-                        window.__signCount = (window.__signCount || 0) + 1; // one call = one approval
-                        const out = [];
-                        for (const input of inputs) {
-                            out.push({ signedTransaction: b64ToBytes(await window.__mockSign(bytesToB64(input.transaction))) });
-                        }
-                        return out;
-                    },
-                },
-                'solana:signAndSendTransaction': {
-                    version: '1.0.0',
-                    supportedTransactionVersions: ['legacy', 0],
-                    signAndSendTransaction: async () => { throw new Error('not used'); },
-                },
-            },
-        };
-        const register = ({ register: reg }) => reg(wallet);
-        window.addEventListener('wallet-standard:app-ready', (e) => register(e.detail));
-        window.dispatchEvent(new CustomEvent('wallet-standard:register-wallet', { detail: register }));
-    }, user.publicKey.toBase58(), [...user.publicKey.toBytes()]);
 
     const clickText = async (selector, text) => {
         await page.waitForFunction((sel, t) => [...document.querySelectorAll(sel)].some(el => el.textContent.trim().includes(t)), { timeout: 20000 }, selector, text);
@@ -365,6 +308,10 @@ try {
     }
     await shot('7-privacy');
     if (errors.length) console.log('  page errors:', errors.slice(0, 5));
+    // Any request that failed with an internal error (the user sees "Something went wrong"), or a
+    // page crash, fails the run even if the flow above carried on.
+    const internal = backendLog.split('\n').filter(l => /\[api\] failed|Something went wrong|\[client\] crash/.test(l));
+    if (internal.length) throw new Error(`internal errors during the run:\n${internal.join('\n')}`);
     console.log('\nUI test passed');
 } catch (err) {
     failed = true;

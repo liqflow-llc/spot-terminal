@@ -75,5 +75,7 @@ export function errorDetail(err) {
     const msg = err?.message || String(err);
     const logs = err?.logs || err?.transactionLogs;
     const tail = Array.isArray(logs) ? logs.filter(l => /error|failed|insufficient/i.test(l)).slice(-2).join(' | ') : '';
-    return tail ? `${msg} :: ${tail}` : msg;
+    const out = tail ? `${msg} :: ${tail}` : msg;
+    // A friendly error wrapping the real one (err.cause): log both.
+    return err?.cause ? `${out} <- ${errorDetail(err.cause)}` : out;
 }
