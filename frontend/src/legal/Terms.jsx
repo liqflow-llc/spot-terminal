@@ -74,9 +74,9 @@ export default function Terms() {
         <h2>5. The setup deposit</h2>
         <p>
           Your first order creates small payout accounts that your wallet controls, funded with a
-          refundable SOL deposit (network rent). I never hold it. You can get it back at any time on
-          the <Link to="/account">Account page</Link>, except the part backing orders that are still
-          open.
+          refundable SOL deposit (network rent). I never hold it. You can get it back at any time by
+          closing your account on the <Link to="/account">Account page</Link>, which also cancels any
+          open orders and returns their funds to your wallet.
         </p>
 
         <h2>6. Creating markets, and the tokens you trade</h2>

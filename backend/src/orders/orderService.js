@@ -107,6 +107,7 @@ function describePending(p) {
     if (p.kind === 'cancelAll') return { orders: p.orderIds?.length };
     if (p.kind === 'createMarket') return { market: short(p.market) };
     if (p.kind === 'closePayout') return { accounts: p.nonceAddresses?.length, sol: p.refundLamports / 1e9 };
+    if (p.kind === 'closeAccount') return { cancels: p.cancels?.flat().length, accounts: p.nonceAddresses?.length, sol: p.refundLamports / 1e9 };
     if (p.kind === 'setup') return { accounts: p.nonceAddresses?.length };
     return {};
 }
@@ -290,7 +291,7 @@ export class OrderService {
         for (const p of this.pending.values()) {
             if (p.wallet !== wallet) continue;
             if (p.kind === 'order') used.add(p.order.nonce);
-            if (p.kind === 'closePayout') p.nonceAddresses.forEach(a => used.add(a));
+            if (p.kind === 'closePayout' || p.kind === 'closeAccount') p.nonceAddresses.forEach(a => used.add(a));
         }
         return used;
     }
@@ -634,6 +635,26 @@ export class OrderService {
             const signature = await this.send(txs[0], pending);
             pending.nonceAddresses.forEach(a => this.store.removeNonce(a));
             return { ok: true, signature, refundedSol: pending.refundLamports / 1e9 };
+        }
+
+        if (pending.kind === 'closeAccount') {
+            const closeTx = pending.nonceAddresses.length ? txs[txs.length - 1] : null;
+            let signature = null, cancelled = 0;
+            // Cancels first, in order; a failure stops here, before any payout account is closed.
+            for (let i = 0; i < pending.cancels.length; i++) {
+                signature = await this.send(txs[i], pending);
+                for (const orderId of pending.cancels[i]) this.store.update(orderId, { status: 'cancelled', cancelSignature: signature });
+                cancelled += pending.cancels[i].length;
+            }
+            if (closeTx) {
+                const busy = this.store.noncesInUse(pending.wallet);
+                if (pending.nonceAddresses.some(a => busy.has(a))) {
+                    throw new UserError(`A new order started using your payout accounts, so they weren't closed${cancelled ? ` (your other ${cancelled} order${cancelled === 1 ? ' was' : 's were'} cancelled)` : ''}. Please try again.`);
+                }
+                signature = await this.send(closeTx, pending);
+                pending.nonceAddresses.forEach(a => this.store.removeNonce(a));
+            }
+            return { ok: true, signature, cancelled, refundedSol: pending.refundLamports / 1e9 };
         }
 
         if (pending.kind === 'cancelAll') {
@@ -1065,6 +1086,8 @@ export class OrderService {
         const free = accounts.filter(a => !a.inUse);
         return {
             accounts,
+            totalSol: accounts.reduce((s, a) => s + a.lamports, 0) / 1e9,
+            openOrders: this.store.forWallet(walletPk.toBase58()).filter(o => o.status === 'open' || o.status === 'expired').length,
             refundableSol: free.reduce((s, a) => s + a.lamports, 0) / 1e9,
             lockedSol: accounts.filter(a => a.inUse).reduce((s, a) => s + a.lamports, 0) / 1e9,
             inUseCount: accounts.length - free.length,
@@ -1258,9 +1281,28 @@ export class OrderService {
             .filter(o => o.market === market && (o.status === 'open' || o.status === 'expired'));
         if (!all.length) throw new UserError('No open orders on this market');
         const batch = all.slice(0, CANCEL_ALL_MAX); // transaction size limit; the rest on a second click
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+        const tx = await this.buildCancelTx(walletPk, market, batch, { blockhash, lastValidBlockHeight });
+        const id = crypto.randomUUID();
+        this.pending.set(id, {
+            kind: 'cancelAll', orderIds: batch.map(o => o.id), market, wallet: walletPk.toBase58(), createdAt: Date.now(),
+            messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight,
+        });
+        return {
+            step: 'sign', id,
+            transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')],
+            remaining: all.length - batch.length,
+            summary: { title: `Cancel ${batch.length} order${batch.length === 1 ? '' : 's'}`, detail: 'Cancels them and returns their funds to your wallet.' },
+        };
+    }
+
+    /**
+     * One transaction cancelling `batch` (orders on one market, at most CANCEL_ALL_MAX), voiding
+     * their payouts and withdrawing everything they free to the wallet.
+     */
+    async buildCancelTx(walletPk, market, batch, { blockhash, lastValidBlockHeight }) {
         const ctx = await this.loadContext(walletPk, market);
         const onBook = new Set(this.markets.allOrders(market).map(o => o.sequenceNumber.toString()));
-        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
         const tx = new Transaction({ feePayer: walletPk, blockhash, lastValidBlockHeight });
         tx.add(...priorityIxs(CANCEL_CU + 25_000 * batch.length));
         for (const o of batch) tx.add(SystemProgram.nonceAdvance({ noncePubkey: new PublicKey(o.nonce), authorizedPubkey: walletPk }));
@@ -1273,16 +1315,64 @@ export class OrderService {
             }));
         }
         await this.appendWithdrawAll(tx, walletPk, ctx, { excludeOrderId: new Set(batch.map(o => o.id)) });
+        return tx;
+    }
+
+    /**
+     * Close the wallet's account here in one approval: cancel every open order (any market),
+     * return their funds, then close all payout accounts and refund their SOL rent. The payout
+     * accounts are only closed if every cancel went through.
+     */
+    async prepareCloseAccount({ wallet }) {
+        const walletPk = parseWallet(wallet);
+        const w = walletPk.toBase58();
+        const mine = this.store.forWallet(w);
+        if (mine.some(o => ['placing', 'claiming', 'replacing'].includes(o.status))) {
+            throw new UserError('An order is being placed or paid out right now. Please try again in a moment.');
+        }
+        const open = mine.filter(o => o.status === 'open' || o.status === 'expired');
+        const byMarket = new Map();
+        for (const o of open) byMarket.set(o.market, [...(byMarket.get(o.market) || []), o]);
+        for (const list of byMarket.values()) {
+            if (list.length > CANCEL_ALL_MAX) {
+                throw new UserError(`You have ${list.length} open orders on one market. Use Cancel all on that market first, then close your account.`);
+            }
+        }
+        const { accounts } = await this.payoutAccounts(w);
+        if (!accounts.length && !open.length) throw new UserError('There is nothing to close.');
+
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+        const cancels = [];
+        for (const [market, list] of byMarket) {
+            cancels.push({ tx: await this.buildCancelTx(walletPk, market, list, { blockhash, lastValidBlockHeight }), orderIds: list.map(o => o.id) });
+        }
+        const txs = cancels.map(c => c.tx);
+        let refundLamports = 0;
+        if (accounts.length) {
+            const close = new Transaction({ feePayer: walletPk, blockhash, lastValidBlockHeight });
+            close.add(...priorityIxs(5_000 + accounts.length * 2_000));
+            // Withdrawing a nonce account's whole balance closes it.
+            for (const a of accounts) {
+                close.add(SystemProgram.nonceWithdraw({ noncePubkey: new PublicKey(a.address), authorizedPubkey: walletPk, toPubkey: walletPk, lamports: a.lamports }));
+            }
+            await this.simulateOrThrow(close);
+            refundLamports = accounts.reduce((sum, a) => sum + a.lamports, 0);
+            txs.push(close);
+        }
         const id = crypto.randomUUID();
         this.pending.set(id, {
-            kind: 'cancelAll', orderIds: batch.map(o => o.id), market, wallet: walletPk.toBase58(), createdAt: Date.now(),
-            messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight,
+            kind: 'closeAccount', wallet: w, createdAt: Date.now(),
+            messages: txs.map(t => t.serializeMessage()), blockhash, lastValidBlockHeight,
+            cancels: cancels.map(c => c.orderIds), nonceAddresses: accounts.map(a => a.address), refundLamports,
         });
         return {
             step: 'sign', id,
-            transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')],
-            remaining: all.length - batch.length,
-            summary: { title: `Cancel ${batch.length} order${batch.length === 1 ? '' : 's'}`, detail: 'Cancels them and returns their funds to your wallet.' },
+            transactions: txs.map(t => t.serialize({ requireAllSignatures: false }).toString('base64')),
+            summary: {
+                title: 'Close account',
+                detail: `${open.length ? `Cancels ${open.length} open order${open.length === 1 ? '' : 's'} and returns their funds. ` : ''}Refunds ${(refundLamports / 1e9).toFixed(5)} SOL rent.`,
+                cancelled: open.length, refundSol: refundLamports / 1e9,
+            },
         };
     }
 

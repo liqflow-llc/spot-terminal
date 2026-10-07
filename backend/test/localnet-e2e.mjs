@@ -367,6 +367,30 @@ await test('Cancel all cancels every order on the market and returns the funds',
     await assert.rejects(service.prepareCancelAll({ wallet, market: mBQ }), /No open orders/);
 });
 
+await test('Close account: cancels open orders on every market, returns their funds, refunds all rent', async () => {
+    const wallet = maker.publicKey.toBase58();
+    const a = await placeOrder({ market: mBQ, side: 'sell', price: '70', size: '1' });
+    const b = await placeOrder({ market: mBS, side: 'sell', price: '70', size: '2' });
+    const before = await service.payoutAccounts(wallet);
+    log('open orders', before.openOrders, 'payout accounts', before.accounts.length, 'rent', before.totalSol, 'SOL');
+    assert.ok(before.openOrders >= 2);
+    const baseBefore = await tokenBalance(maker.publicKey, BASE);
+    const solBefore = await tokenBalance(maker.publicKey, NATIVE);
+    const prepared = await service.prepareCloseAccount({ wallet });
+    log('one approval signs', prepared.transactions.length, 'transactions');
+    const res = await signAndSubmit(prepared);
+    log('cancelled', res.cancelled, 'refunded', res.refundedSol, 'SOL');
+    assert.equal(res.cancelled, before.openOrders);
+    assert.equal(store.get(a.id).status, 'cancelled');
+    assert.equal(store.get(b.id).status, 'cancelled');
+    assert.equal(store.forWallet(wallet).filter(o => o.status === 'open' || o.status === 'expired').length, 0, 'no open orders left');
+    assert.ok(await tokenBalance(maker.publicKey, BASE) - baseBefore >= 3_000_000n, 'the orders\' BASE is back');
+    assert.ok(await tokenBalance(maker.publicKey, NATIVE) - solBefore > BigInt(Math.round(before.totalSol * 1e9)) - 200_000n, 'rent back, minus fees');
+    assert.equal((await service.payoutAccounts(wallet)).accounts.length, 0, 'all payout accounts closed');
+    assert.equal((await service.prepareOrder({ wallet, market: mBQ, side: 'buy', price: '1', size: '1' })).step, 'setup', 'next order sets up again');
+    await assert.rejects(service.prepareCloseAccount({ wallet }), /nothing to close/);
+});
+
 await test('An expired order is marked expired and its funds come back with one withdraw', async () => {
     const wallet = maker.publicKey.toBase58();
     const baseBefore = await tokenBalance(maker.publicKey, BASE);

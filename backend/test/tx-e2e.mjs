@@ -363,10 +363,23 @@ await test('An unsigned (rejected or abandoned) request never makes the next ord
     assert.equal(store.get(res.orderId).status, 'open');
 });
 
-await test('Refund approved too slowly: clear message, deposit still there; a fresh refund works', async () => {
-    await expectExpired(await service.prepareClosePayout({ wallet }), walletState);
-    const res = await submit(await service.prepareClosePayout({ wallet }));
+let lastOrder;
+await test('Close account approved too slowly: clear message, the order stays open, accounts kept', async () => {
+    lastOrder = await placeOrder({ market: mBQ, side: 'sell', price: '1.5', size: '1' });
+    await expectExpired(await service.prepareCloseAccount({ wallet }), walletState);
+    assert.equal(store.get(lastOrder.id).status, 'open');
+});
+
+await test('An order fills before Close account is approved: clear message, payout accounts kept; a fresh close works', async () => {
+    const prepared = await service.prepareCloseAccount({ wallet });
+    const accounts = store.noncesFor(wallet).length;
+    await takerBuys(mBQ, 2_000_000n);
+    await waitFor(() => store.get(lastOrder.id).status === 'claimed', 'keeper pays out');
+    await expectUserError(submit(prepared), /can't go through anymore|changed/);
+    assert.equal(store.noncesFor(wallet).length, accounts, 'no payout account closed');
+    const res = await submit(await service.prepareCloseAccount({ wallet }));
     assert.ok(res.refundedSol > 0);
+    assert.equal(store.noncesFor(wallet).length, 0);
 });
 
 // ---------- the same, through the real UI ----------

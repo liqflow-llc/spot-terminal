@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 import TopBar from './TopBar.jsx';
+import Modal from './Modal.jsx';
 import { useToast } from './Toasts.jsx';
 import { getJSON, postJSON } from '../services/api';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
@@ -21,6 +22,7 @@ export default function AccountPage() {
   const [payout, setPayout] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);
+  const [confirming, setConfirming] = useState(false);
 
   useEffect(() => { document.title = 'Account · Spot'; }, []);
 
@@ -31,17 +33,23 @@ export default function AccountPage() {
   }, [wallet]);
   useEffect(load, [load]);
 
-  async function refund() {
+  async function closeAccount() {
+    setConfirming(false);
     setBusy('Preparing…');
     try {
       const prepared = await postJSON('/api/payout-accounts/close', { wallet });
       setBusy('Approve in your wallet…');
       const res = await signAndSubmit(prepared, signAllTransactions);
-      toast({ kind: 'success', title: `Refunded ${sol(res.refundedSol)}`, link: explorerTx(res.signature) });
+      toast({
+        kind: 'success',
+        title: `Account closed: refunded ${sol(res.refundedSol)}`,
+        message: res.cancelled ? `${res.cancelled} open order${res.cancelled === 1 ? ' was' : 's were'} cancelled and the funds returned to your wallet.` : undefined,
+        link: explorerTx(res.signature),
+      });
     } catch (err) {
       if (!isUserRejection(err)) {
-        toast({ kind: 'error', title: 'Refund failed', message: err.message });
-        reportError('refund_failed', err, { wallet });
+        toast({ kind: 'error', title: 'Account not closed', message: err.message });
+        reportError('close_account_failed', err, { wallet });
       }
     } finally {
       setBusy(null);
@@ -50,6 +58,8 @@ export default function AccountPage() {
   }
 
   const count = payout?.accounts.length || 0;
+  const openOrders = payout?.openOrders || 0;
+  const ordersText = `${openOrders} open order${openOrders === 1 ? '' : 's'}`;
   const push = usePushNotifications(wallet);
   const { pref: themePref, setPref: setThemePref } = useTheme();
 
@@ -58,54 +68,6 @@ export default function AccountPage() {
       <TopBar />
       <main className="account-main">
         <h1>Account</h1>
-
-        <section className="account-card">
-          <h2>Setup deposit</h2>
-          <p className="muted">
-            Your first order sets up payout accounts that send filled orders straight to your wallet.
-            They hold a small SOL deposit, which you can get back here anytime.
-          </p>
-
-          {!wallet && (
-            <div className="account-connect">
-              <span>Connect your wallet to see your deposit.</span>
-              <WalletMultiButton />
-            </div>
-          )}
-
-          {wallet && !payout && !error && <div className="account-row"><span className="spinner" /> Loading…</div>}
-          {wallet && error && <div className="account-row error">{error} <button type="button" className="btn small" onClick={load}>Retry</button></div>}
-
-          {wallet && payout && (
-            count === 0 ? (
-              <div className="account-row">No deposit. Nothing to refund.</div>
-            ) : (
-              <>
-                <dl className="account-stats">
-                  <div><dt>Refundable now</dt><dd className="num">{sol(payout.refundableSol)}</dd></div>
-                  {payout.inUseCount > 0 && (
-                    <div><dt>Held by open orders</dt><dd className="num">{sol(payout.lockedSol)}</dd></div>
-                  )}
-                </dl>
-                {payout.inUseCount > 0 && (
-                  <p className="muted small">
-                    {payout.inUseCount === 1 ? '1 payout account is' : `${payout.inUseCount} payout accounts are`} backing
-                    open orders. That part becomes refundable once those orders fill or are cancelled.
-                  </p>
-                )}
-                <button
-                  type="button"
-                  className="btn primary"
-                  disabled={!!busy || !(payout.refundableSol > 0)}
-                  onClick={refund}
-                >
-                  {busy || `Refund ${sol(payout.refundableSol)}`}
-                </button>
-                <p className="muted small">Your next order will ask for the deposit again.</p>
-              </>
-            )
-          )}
-        </section>
 
         <section className="account-card">
           <h2>Notifications</h2>
@@ -161,6 +123,63 @@ export default function AccountPage() {
           </div>
           <p className="muted small">System follows your device&apos;s light or dark setting. Saved in this browser.</p>
         </section>
+
+        <section className="account-card">
+          <h2>Close account and refund SOL rent</h2>
+          <p className="muted">
+            Your payout accounts (they send filled orders straight to your wallet) hold a small SOL rent.
+            Closing your account refunds it. Your next order sets them up again.
+          </p>
+
+          {!wallet && (
+            <div className="account-connect">
+              <span>Connect your wallet to see your account.</span>
+              <WalletMultiButton />
+            </div>
+          )}
+
+          {wallet && !payout && !error && <div className="account-row"><span className="spinner" /> Loading…</div>}
+          {wallet && error && <div className="account-row error">{error} <button type="button" className="btn small" onClick={load}>Retry</button></div>}
+
+          {wallet && payout && (
+            count === 0 && openOrders === 0 ? (
+              <div className="account-row">Nothing to close. Your account is set up with your first order.</div>
+            ) : (
+              <>
+                {openOrders > 0 && (
+                  <p className="account-warning">This also cancels your {ordersText} and returns their funds to your wallet.</p>
+                )}
+                <button
+                  type="button"
+                  className="btn danger"
+                  disabled={!!busy}
+                  onClick={() => (openOrders > 0 ? setConfirming(true) : closeAccount())}
+                >
+                  {busy || `Close account and refund ${sol(payout.totalSol)}`}
+                </button>
+              </>
+            )
+          )}
+        </section>
+
+        {confirming && (
+          <Modal
+            title="Close account?"
+            danger
+            onClose={() => setConfirming(false)}
+            actions={(
+              <>
+                <button type="button" className="btn" onClick={() => setConfirming(false)}>Keep account</button>
+                <button type="button" className="btn danger" onClick={closeAccount}>Cancel orders and close</button>
+              </>
+            )}
+          >
+            <p>
+              This cancels your <strong>{ordersText}</strong>, returns their funds to your wallet and refunds{' '}
+              <strong>{sol(payout?.totalSol)}</strong> of rent.
+            </p>
+          </Modal>
+        )}
 
         <p className="legal-links account-legal">
           <Link to="/terms">Terms of Service</Link>

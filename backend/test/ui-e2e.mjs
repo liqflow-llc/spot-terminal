@@ -159,12 +159,22 @@ try {
     if (await page.evaluate(() => window.__signCount) !== 2) throw new Error('payout should not need another approval');
     await shot('2-paid-out');
 
-    step('Refunding the setup deposit from the Account page');
+    step('Closing the account with an order still open: confirm, one approval, order cancelled, rent refunded');
+    await setField('Price', '9');
+    await setField('Amount', '1');
+    await clickText('.of-submit', 'Sell');
+    await page.waitForFunction(() => [...document.querySelectorAll('.toast-title')].filter(t => t.textContent.includes('order placed')).length >= 1 && window.__signCount === 3, { timeout: 60000 });
+    const baseBeforeClose = BigInt((await connection.getTokenAccountBalance(spl.getAssociatedTokenAddressSync(BASE, user.publicKey))).value.amount);
     await clickText('.topnav-item', 'Account');
-    await clickText('.account-card button', 'Refund');
-    await page.waitForFunction(() => [...document.querySelectorAll('.toast-title')].some(t => t.textContent.includes('Refunded')), { timeout: 60000 });
-    await page.waitForFunction(() => document.querySelector('.account-card')?.textContent.includes('Nothing to refund'), { timeout: 20000 });
-    if (await page.evaluate(() => window.__signCount) !== 3) throw new Error('refund should be exactly one approval');
+    await page.waitForFunction(() => document.querySelector('.account-warning')?.textContent.includes('cancels your 1 open order'), { timeout: 20000 });
+    await clickText('.account-card button', 'Close account and refund');
+    await page.waitForFunction(() => document.querySelector('.modal.danger')?.textContent.includes('Close account?'), { timeout: 10000 });
+    await clickText('.modal button', 'Cancel orders and close');
+    await page.waitForFunction(() => [...document.querySelectorAll('.toast-title')].some(t => t.textContent.includes('Account closed')), { timeout: 60000 });
+    await page.waitForFunction(() => [...document.querySelectorAll('.account-card')].some(c => c.textContent.includes('Nothing to close')), { timeout: 20000 });
+    if (await page.evaluate(() => window.__signCount) !== 4) throw new Error('closing the account should be exactly one approval');
+    const baseAfterClose = BigInt((await connection.getTokenAccountBalance(spl.getAssociatedTokenAddressSync(BASE, user.publicKey))).value.amount);
+    if (baseAfterClose - baseBeforeClose !== 1_000_000n) throw new Error(`the cancelled order's 1 BASE should be back (got ${baseAfterClose - baseBeforeClose})`);
     await shot('3-refunded');
 
     step('A buy priced far above the market gets a strong warning, and can be backed out of');

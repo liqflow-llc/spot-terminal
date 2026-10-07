@@ -20,3 +20,7 @@
 .segmented button:hover { color: var(--text); }
 .segmented button.active { background: var(--accent-bg); color: var(--accent); font-weight: 600; }
 .segmented button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.account-card .btn.danger { background: var(--ask); border-color: var(--ask); color: #fff; }
+.account-card .btn.danger:not(:disabled):hover { filter: brightness(1.08); }
+.account-card .btn.danger:disabled { opacity: 0.6; }
+.account-warning { color: var(--ask); font-weight: 500; }
