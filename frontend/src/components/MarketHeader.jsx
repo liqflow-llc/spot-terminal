@@ -148,8 +148,9 @@ function MarketSelector({ market }) {
     ...(sortMarkets(list.filter(m => !isFavorite(m.address)), sort) || []),
   ];
   const creatable = token?.quotes.filter(x => !x.market && !list?.some(m => m.base.mint === token.token.mint && m.quote.mint === x.mint)) || [];
-  // Verified tokens with no active market whose name matched (and aren't already listed).
-  const noMarket = found.filter(t => t.activeMarkets === 0 && !list?.some(m => m.base.mint === t.mint));
+  // Verified tokens whose name matched and that have no market at all, with or without orders.
+  // (A token with only empty markets shows those markets in the list instead.)
+  const noMarket = found.filter(t => (t.markets ?? t.activeMarkets) === 0 && !list?.some(m => m.base.mint === t.mint || m.quote.mint === t.mint));
 
   return (
     <div className="selector" ref={ref}>

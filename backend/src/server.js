@@ -246,15 +246,21 @@ app.get('/api/markets', (req, res) => {
         res.set('Cache-Control', 'no-cache');
         return res.json({ markets: wanted.map(a => markets.summary(a)).filter(Boolean).map(marketView) });
     }
-    // A verified token searched by its exact symbol also shows its markets that have no orders yet,
-    // so "SKIRM" finds a freshly created SKIRM market.
-    const namedEmpty = (s) => {
+    // A search also finds markets with no orders yet, so nobody is sent to create a market that
+    // exists: those of a verified token whose symbol or name matches ("WIFE", "jupiter"), and any
+    // market searched by its exact mint or address. (Unverified look-alikes only show with orders.)
+    const searchedEmpty = (s) => {
         if (!q) return false;
+        if (exactHit(s)) return true;
         const t = registry.get(s.baseMint);
-        return !!t?.verified && (t.symbol || '').toLowerCase() === q;
+        if (!t?.verified) return false;
+        return (t.symbol || '').toLowerCase().includes(q) || (t.name || '').toLowerCase().includes(q);
     };
-    let list = markets.allSummaries().filter(s => s.bidCount + s.askCount > 0 || exactHit(s) || namedEmpty(s)).map(marketView);
-    if (q) list = list.filter(m => m.symbol.toLowerCase().includes(q) || m.base.mint === req.query.q || m.address === req.query.q);
+    let list = markets.allSummaries().filter(s => s.bidCount + s.askCount > 0 || searchedEmpty(s)).map(marketView);
+    if (q) {
+        list = list.filter(m => m.symbol.toLowerCase().includes(q) || (m.base.name || '').toLowerCase().includes(q)
+            || m.base.mint === req.query.q || m.quote.mint === req.query.q || m.address === req.query.q);
+    }
     // ?quote=<mint>: only pairs quoted in that token (the SOL / USDC filter).
     if (req.query.quote) list = list.filter(m => m.quote.mint === req.query.quote);
     // Exact token matches first (so "JUP" finds JUP before JupSOL), then verified pairs with
@@ -262,6 +268,7 @@ app.get('/api/markets', (req, res) => {
     const exact = (m) => Number(!!q && (m.base.symbol.toLowerCase() === q || m.base.mint === req.query.q));
     list.sort((a, b) =>
         (exact(b) - exact(a)) ||
+        (Number(b.orders > 0) - Number(a.orders > 0)) ||
         (Number(b.base.verified && b.quote.verified) - Number(a.base.verified && a.quote.verified)) ||
         ((b.volume24hUsd ?? 0) - (a.volume24hUsd ?? 0)) || (b.orders - a.orders));
     res.set('Cache-Control', 'public, max-age=5');
@@ -504,10 +511,13 @@ const NEW_MARKET_QUOTES = [
 app.get('/api/tokens/search', rateLimit('token-search', 60, 60_000), (req, res) => {
     const q = String(req.query.q || '').trim().toLowerCase();
     if (q.length < 2) return res.json({ tokens: [] });
-    const active = new Map(); // mint -> active market count
+    const active = new Map(); // mint -> markets with orders
+    const any = new Map();    // mint -> markets, with orders or not
     for (const s of markets.allSummaries()) {
-        if (s.bidCount + s.askCount === 0) continue;
-        for (const m of [s.baseMint, s.quoteMint]) active.set(m, (active.get(m) || 0) + 1);
+        for (const m of [s.baseMint, s.quoteMint]) {
+            any.set(m, (any.get(m) || 0) + 1);
+            if (s.bidCount + s.askCount > 0) active.set(m, (active.get(m) || 0) + 1);
+        }
     }
     const rank = (t) => {
         const sym = (t.symbol || '').toLowerCase(), name = (t.name || '').toLowerCase();
@@ -525,7 +535,7 @@ app.get('/api/tokens/search', rateLimit('token-search', 60, 60_000), (req, res) 
     hits.sort((a, b) => (a.r - b.r) || ((b.t.liquidity ?? 0) - (a.t.liquidity ?? 0)));
     res.set('Cache-Control', 'public, max-age=30');
     res.json({
-        tokens: hits.slice(0, 8).map(({ t }) => ({ ...registry.display(t.mint), activeMarkets: active.get(t.mint) || 0 })),
+        tokens: hits.slice(0, 8).map(({ t }) => ({ ...registry.display(t.mint), activeMarkets: active.get(t.mint) || 0, markets: any.get(t.mint) || 0 })),
     });
 });
 app.get('/api/tokens/:mint', rateLimit('tokens', 30, 60_000), async (req, res) => {
