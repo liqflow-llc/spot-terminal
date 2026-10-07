@@ -109,6 +109,7 @@ export class TokenRegistry {
             decimals: t ? t.decimals : null,
             icon: t?.icon || null,
             verified: !!t?.verified,
+            kind: t?.kind || null,
             usdPrice: price,
         };
     }
@@ -237,6 +238,21 @@ export class TokenRegistry {
         return p;
     }
 
+    /**
+     * 'stable' (USD/EUR stablecoins and Jupiter Lend tokens of them), 'lst' (liquid staked SOL and
+     * SOL yield tokens), or null, from Jupiter's token tags. Used to keep these pairs out of the
+     * default market list (their volume would bury everything else).
+     */
+    static kindFromTags(tags = [], symbol = '') {
+        if (tags.includes('stable')) return 'stable';
+        if (tags.includes('lst')) return 'lst';
+        if (tags.includes('yield') || tags.includes('jup-lend-earn')) {
+            if (/usd|eur/i.test(symbol)) return 'stable';
+            if (/sol/i.test(symbol)) return 'lst';
+        }
+        return null;
+    }
+
     async refreshVerified() {
         try {
             const list = await this.jupFetch('/tokens/v2/tag?query=verified');
@@ -253,6 +269,7 @@ export class TokenRegistry {
                     verified: true,
                     liquidity: typeof t.liquidity === 'number' ? t.liquidity : null,
                     mcap: typeof t.mcap === 'number' ? t.mcap : null,
+                    kind: TokenRegistry.kindFromTags(Array.isArray(t.tags) ? t.tags : [], t.symbol || ''),
                     source: 'jupiter',
                 });
                 if (typeof t.usdPrice === 'number' && t.usdPrice > 0) this.setPrice(t.id, t.usdPrice, now);

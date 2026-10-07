@@ -53,10 +53,14 @@ function Star({ on, onClick, size = 14 }) {
   );
 }
 
+// Token markets by default (stablecoin and liquid-staking pairs have so much volume they'd fill
+// the top of the list), optionally by quote; stables and LSTs have their own chips.
 const QUOTE_FILTERS = [
-  { id: 'all', label: 'All', mint: null },
-  { id: 'SOL', label: 'SOL', mint: 'So11111111111111111111111111111111111111112' },
-  { id: 'USDC', label: 'USDC', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' },
+  { id: 'all', label: 'All', mint: null, category: 'token', title: 'Token markets (stablecoin and LST pairs have their own tabs)' },
+  { id: 'SOL', label: 'SOL', mint: 'So11111111111111111111111111111111111111112', category: 'token', title: 'Token markets priced in SOL' },
+  { id: 'USDC', label: 'USDC', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', category: 'token', title: 'Token markets priced in USDC' },
+  { id: 'stable', label: 'Stables', mint: null, category: 'stable', title: 'Stablecoin and pegged pairs (USDT/USDC, cbBTC/WBTC, ...)' },
+  { id: 'lst', label: 'LSTs', mint: null, category: 'lst', title: 'Liquid staking tokens (JitoSOL, mSOL, JupSOL, ...)' },
 ];
 const QUOTE_FILTER_KEY = 'spot.quoteFilter';
 const readQuoteFilter = () => {
@@ -91,6 +95,7 @@ function MarketSelector({ market }) {
     const params = new URLSearchParams({ limit: '150' });
     if (query) params.set('q', query.trim());
     if (quoteFilter.mint) params.set('quote', quoteFilter.mint);
+    if (quoteFilter.category) params.set('category', quoteFilter.category);
     const t = setTimeout(() => {
       getJSON(`/api/markets?${params}`)
         .then(r => setList(r.markets))
@@ -142,6 +147,7 @@ function MarketSelector({ market }) {
   const q = query.trim().toLowerCase();
   const favMatches = list ? favList.filter(m => isFavorite(m.address)
     && (!quoteFilter.mint || m.quote.mint === quoteFilter.mint)
+    && (!!q || !quoteFilter.category || !m.category || m.category === quoteFilter.category)
     && (!q || list.some(x => x.address === m.address) || m.symbol.toLowerCase().includes(q))) : [];
   const sorted = list && [
     ...(sortMarkets(favMatches, sort) || []),
@@ -174,8 +180,8 @@ function MarketSelector({ market }) {
           />
           <div className="selector-filters" role="tablist" aria-label="Quote token">
             {QUOTE_FILTERS.map(f => (
-              <button key={f.id} type="button" role="tab" aria-selected={quoteFilter.id === f.id} className={`selector-filter ${quoteFilter.id === f.id ? 'active' : ''}`} onClick={() => setQuoteFilter(f)}>
-                {f.mint ? `${f.label} pairs` : f.label}
+              <button key={f.id} type="button" role="tab" aria-selected={quoteFilter.id === f.id} className={`selector-filter ${quoteFilter.id === f.id ? 'active' : ''}`} title={f.title} onClick={() => setQuoteFilter(f)}>
+                {f.label}
               </button>
             ))}
           </div>

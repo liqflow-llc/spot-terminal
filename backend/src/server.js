@@ -140,6 +140,21 @@ function hiLo(address, st) {
     };
 }
 
+/**
+ * What kind of market: 'stable' (a stablecoin priced in anything, or a pegged pair of the same
+ * asset such as cbBTC/WBTC or PAXG/XAUt0), 'lst' (a liquid staking token, or SOL priced in one),
+ * or 'token' (everything else: the default list).
+ */
+function marketCategory(base, quote, baseMint) {
+    if (base.kind === 'stable') return 'stable';
+    if (base.kind === 'lst' || (quote.kind === 'lst' && baseMint === SOL_MINT_ADDRESS)) return 'lst';
+    // Same asset on both sides (not a $1 token against a stablecoin, which is an ordinary market).
+    if (quote.kind !== 'stable' && base.usdPrice > 0 && quote.usdPrice > 0 && Math.abs(base.usdPrice / quote.usdPrice - 1) < 0.03) return 'stable';
+    return 'token';
+}
+const SOL_MINT_ADDRESS = 'So11111111111111111111111111111111111111112';
+const MARKET_CATEGORIES = new Set(['token', 'stable', 'lst']);
+
 function marketView(s, { withHiLo = false } = {}) {
     const base = registry.display(s.baseMint);
     const quote = registry.display(s.quoteMint);
@@ -160,6 +175,7 @@ function marketView(s, { withHiLo = false } = {}) {
         address: s.address,
         venue: s.venue,
         symbol: `${base.symbol}/${quote.symbol}`,
+        category: marketCategory(base, quote, s.baseMint),
         base: { mint: s.baseMint, symbol: base.symbol, name: base.name, icon: base.icon, decimals: s.baseDecimals, verified: base.verified, usdPrice: base.usdPrice },
         quote: { mint: s.quoteMint, symbol: quote.symbol, name: quote.name, icon: quote.icon, decimals: s.quoteDecimals, verified: quote.verified, usdPrice: quote.usdPrice },
         bestBid: s.bestBid,
@@ -274,6 +290,9 @@ app.get('/api/markets', (req, res) => {
     }
     // ?quote=<mint>: only pairs quoted in that token (the SOL / USDC filter).
     if (req.query.quote) list = list.filter(m => m.quote.mint === req.query.quote);
+    // ?category=token|stable|lst: the default list leaves out stablecoin and LST pairs, whose volume
+    // would otherwise fill the top; they have their own chips. A search looks across all of them.
+    if (!q && MARKET_CATEGORIES.has(req.query.category)) list = list.filter(m => m.category === req.query.category);
     // Exact token matches first (so "JUP" finds JUP before JupSOL), then verified pairs with
     // real 24h activity.
     const exact = (m) => Number(!!q && (m.base.symbol.toLowerCase() === q || m.base.mint === req.query.q));
