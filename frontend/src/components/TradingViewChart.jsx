@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { createDatafeed } from '../services/datafeed';
+import { ammTicker, createDatafeed } from '../services/datafeed';
 import { formatAmount } from '../utils/format';
 import { reportError } from '../services/report';
 import { useTheme } from '../theme';
@@ -66,6 +66,11 @@ export default function TradingViewChart({ address, onTrade, orders = [], onCanc
   const addressRef = useRef(address); // the market we should show
   const shownRef = useRef(null);      // the market the chart was last told to show
   const [error, setError] = useState(null);
+  // Which chart: SpotBook's own book (the default: what limit orders fill against), or the most
+  // active pool for the pair anywhere on Solana.
+  const [source, setSource] = useState('manifest');
+  const ticker = source === 'amm' ? ammTicker(address) : address;
+  const toggleRef = useRef(null);
   const { theme } = useTheme();
   const themeRef = useRef(theme);    // the theme the chart is showing
   const [ready, setReady] = useState(0); // bumps when the chart is ready or shows a new market
@@ -74,7 +79,7 @@ export default function TradingViewChart({ address, onTrade, orders = [], onCanc
   const handlersRef = useRef({});
   handlersRef.current = { onCancelOrder, onMoveOrder };
   onTradeRef.current = onTrade;
-  addressRef.current = address;
+  addressRef.current = ticker; // the symbol the chart should show
 
   // Create the widget once; market changes are applied with setSymbol below.
   useEffect(() => {
@@ -98,6 +103,16 @@ export default function TradingViewChart({ address, onTrade, orders = [], onCanc
         loading_screen: { backgroundColor: CHART_THEME[themeRef.current].bg, foregroundColor: '#4c8dff' },
       });
       widgetRef.current = widget;
+      // The chart switch, in TradingView's own toolbar.
+      widget.headerReady().then(() => {
+        if (cancelled) return;
+        const btn = widget.createButton({ align: 'left' });
+        btn.setAttribute('title', 'Manifest: trades on the order book your limit orders rest on. All DEXs: the most active pool for this pair anywhere on Solana (GeckoTerminal), which can pass your limit price briefly without filling it.');
+        btn.style.cursor = 'pointer';
+        btn.addEventListener('click', () => setSource(src => (src === 'amm' ? 'manifest' : 'amm')));
+        toggleRef.current = btn;
+        setReady(r => r + 1);
+      }).catch(err => reportError('chart_toggle_failed', err));
       widget.onChartReady(() => {
         readyRef.current = true;
         // The market may have changed while the first chart was still loading.
@@ -128,10 +143,20 @@ export default function TradingViewChart({ address, onTrade, orders = [], onCanc
 
   useEffect(() => {
     const widget = widgetRef.current;
-    if (widget && readyRef.current && shownRef.current !== address) {
-      widget.activeChart().setSymbol((shownRef.current = address), () => setReady(r => r + 1));
+    if (widget && readyRef.current && shownRef.current !== ticker) {
+      widget.activeChart().setSymbol((shownRef.current = ticker), () => setReady(r => r + 1));
     }
-  }, [address]);
+  }, [ticker]);
+
+  // The switch's label shows both charts, the current one highlighted.
+  useEffect(() => {
+    const btn = toggleRef.current;
+    if (!btn) return;
+    const on = 'font-weight:600;color:#4c8dff', off = 'opacity:.7';
+    btn.innerHTML = `<span style="${source === 'manifest' ? on : off}">Manifest</span>`
+      + '<span style="opacity:.5;padding:0 6px">|</span>'
+      + `<span style="${source === 'amm' ? on : off}">All DEXs</span>`;
+  }, [source, ready]);
 
   // The wallet's open orders as price lines (drag to change the price, ✕ to cancel) and its
   // filled orders as buy/sell markers.

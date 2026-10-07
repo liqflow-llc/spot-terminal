@@ -16,7 +16,7 @@ const GT_CACHE_MS = 5 * 60 * 1000;
 const GECKO_WAIT_MS = 3000;
 
 // TradingView resolution -> [GeckoTerminal timeframe, aggregate, seconds]
-const RESOLUTIONS = {
+export const RESOLUTIONS = {
     1: ['minute', 1, 60], 5: ['minute', 5, 300], 15: ['minute', 15, 900],
     60: ['hour', 1, 3600], 240: ['hour', 4, 14400], '1D': ['day', 1, 86400],
 };

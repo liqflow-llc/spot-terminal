@@ -17,6 +17,7 @@ import { Ledger } from './orders/ledger.js';
 import { TAX_APPS, buildRows, exportCsv } from './tax/exports.js';
 import { aggregateBook } from './marketdata/aggregate.js';
 import { GeckoStats } from './marketdata/geckoStats.js';
+import { AmmChart } from './marketdata/ammChart.js';
 import { errorDetail, log, short, takeProblemCounts } from './log.js';
 import { takeRpcStats } from './rpcStats.js';
 import { startLogRotation } from './logRotate.js';
@@ -47,6 +48,7 @@ async function referencePrice(address) {
     return base > 0 && quote > 0 ? base / quote : null;
 }
 
+const ammChart = new AmmChart({ markets });
 const ledger = new Ledger(); // what moved into / out of SpotBook, for the tax exports
 const orders = new OrderService({
     markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey, referencePrice, ledger,
@@ -326,6 +328,27 @@ app.get('/api/markets/:address/trades', (req, res) => {
     const archerTrades = archerPairMarkets(s).flatMap(m => archerTradesFor(s, archer.recentTrades(m.address), m));
     const merged = [...trades.recentTrades(req.params.address, limit), ...archerTrades].sort((a, b) => b.time - a.time).slice(0, limit);
     res.json({ trades: merged });
+});
+
+// The all-Solana chart (most active pool anywhere, via GeckoTerminal): marketdata/ammChart.js.
+app.get('/api/markets/:address/amm-source', rateLimit('candles', 60, 60_000), async (req, res) => {
+    if (!requireMarket(req, res)) return;
+    try {
+        res.json({ source: await ammChart.source(req.params.address) });
+    } catch (err) {
+        log.warn('amm-chart', 'source_failed', { market: short(req.params.address), msg: err.message });
+        res.status(502).json({ error: 'Market data provider unavailable, try again shortly.' });
+    }
+});
+app.get('/api/markets/:address/amm-candles', rateLimit('candles', 60, 60_000), async (req, res) => {
+    if (!requireMarket(req, res)) return;
+    const { resolution, from, to } = req.query;
+    try {
+        res.json(await ammChart.bars(req.params.address, resolution, Number(from), Number(to)));
+    } catch (err) {
+        log.warn('amm-chart', 'candles_failed', { market: short(req.params.address), msg: err.message });
+        res.status(502).json({ error: 'Market data provider unavailable, try again shortly.' });
+    }
 });
 
 app.get('/api/markets/:address/candles', rateLimit('candles', 60, 60_000), async (req, res) => {
