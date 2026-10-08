@@ -29,18 +29,28 @@ function useToken(mint) {
   return state?.mint === (mint || '').trim() ? state : null;
 }
 
+const PRESET_QUOTES = {
+  So11111111111111111111111111111111111111112: 'SOL',
+  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 'USDC',
+};
+/** Props that open the dialog on a given pair (SOL and USDC are chips; anything else is "Other"). */
+export const createPairProps = (baseMint, quoteMint) => (PRESET_QUOTES[quoteMint]
+  ? { initialBase: baseMint, initialQuote: PRESET_QUOTES[quoteMint] }
+  : { initialBase: baseMint, initialQuote: 'other', initialOther: quoteMint });
+
 /**
  * Create a Manifest market for any token against SOL, USDC or any other token (by its mint).
  * Opened with both tokens chosen (e.g. "Create SKIRM/SOL"), it goes straight to the cost step.
+ * `onCreated(address)` replaces opening the market (also when it turns out to exist already).
  */
-export default function CreateMarketModal({ initialBase = '', initialQuote = null, onClose }) {
+export default function CreateMarketModal({ initialBase = '', initialQuote = null, initialOther = '', onClose, onCreated = null }) {
   const { publicKey, signAllTransactions } = useWallet();
   const { setVisible } = useWalletModal();
   const toast = useToast();
   const navigate = useNavigate();
   const [baseInput, setBaseInput] = useState(initialBase);
   const [quoteChoice, setQuoteChoice] = useState(initialQuote || 'SOL'); // a symbol from the list, or OTHER
-  const [otherInput, setOtherInput] = useState('');
+  const [otherInput, setOtherInput] = useState(initialOther);
   const [stage, setStage] = useState({ step: 'form' }); // form | preparing | confirm | signing
   const [error, setError] = useState(null);
   const base = useToken(baseInput);
@@ -54,7 +64,10 @@ export default function CreateMarketModal({ initialBase = '', initialQuote = nul
   const sameToken = base?.data && quote && base.data.token.mint === quote.mint;
   const ready = !!base?.data && !!quote && !sameToken;
 
-  const go = (address) => { onClose(); navigate(`/trade/${address}`); };
+  const go = (address) => {
+    onClose();
+    if (onCreated) onCreated(address); else navigate(`/trade/${address}`);
+  };
 
   async function prepare() {
     if (!publicKey) { setVisible(true); return; }
@@ -75,7 +88,7 @@ export default function CreateMarketModal({ initialBase = '', initialQuote = nul
     setStage({ step: 'signing', prepared });
     try {
       const res = await signAndSubmit(prepared, signAllTransactions);
-      toast({ kind: 'success', title: `${base.data.token.symbol}/${quote.symbol} market created`, message: 'Place the first order to start the book.', link: explorerTx(res.signature) });
+      toast({ kind: 'success', title: `${base.data.token.symbol}/${quote.symbol} market created`, message: onCreated ? 'Now approve your limit order.' : 'Place the first order to start the book.', link: explorerTx(res.signature) });
       go(res.market);
     } catch (err) {
       if (!isUserRejection(err)) {
@@ -89,7 +102,7 @@ export default function CreateMarketModal({ initialBase = '', initialQuote = nul
   // Opened with both sides chosen: skip straight to the cost once the base token resolves.
   const [autoStarted, setAutoStarted] = useState(false);
   useEffect(() => {
-    if (autoStarted || !initialBase || !initialQuote || initialQuote === OTHER || !ready || !publicKey) return;
+    if (autoStarted || !initialBase || !initialQuote || (initialQuote === OTHER && !initialOther) || !ready || !publicKey) return;
     setAutoStarted(true);
     if (presetQuote?.market) go(presetQuote.market); else prepare();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -121,6 +134,7 @@ export default function CreateMarketModal({ initialBase = '', initialQuote = nul
         <p>
           Opens a new zero-fee {pair} order book on Manifest that anyone can trade. One-time cost of{' '}
           <strong>{stage.prepared.summary.costSol.toFixed(4)} SOL</strong> (network rent, not refundable).
+          {onCreated ? ' Your limit order is placed on it right after, with a second approval.' : null}
         </p>
       ) : (
         <div className="cm-form">

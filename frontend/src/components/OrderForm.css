@@ -44,3 +44,4 @@
 .of-expiry { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
 .of-expiry select { height: 26px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 4px; color: var(--text); font-size: 12px; padding: 0 6px; }
 @media (max-width: 760px) { .of-loading { height: 600px; } } /* the form's real height on phones, so nothing below jumps */
+.of-choices { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; line-height: 1.45; }

@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getJSON } from '../services/api';
 
+/** "<baseMint>-<quoteMint>": a pair with no Manifest market, traded through Jupiter only. */
+export const isPairAddress = (address) => /^[1-9A-HJ-NP-Za-km-z]{32,44}-[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address || '');
+export const pairAddress = (baseMint, quoteMint) => `${baseMint}-${quoteMint}`;
+
 /** Live data for one market: ticker, aggregated book and recent trades, over one EventSource. */
 export function useMarketStream(address) {
   const [market, setMarket] = useState(null);
@@ -18,6 +22,8 @@ export function useMarketStream(address) {
     setError(null);
 
     getJSON(`/api/markets/${address}`).then(m => !closed && setMarket(m)).catch(err => !closed && setError(err.message));
+    // A pair with no Manifest market ("<base>-<quote>") has no book or trades to stream.
+    if (isPairAddress(address)) return () => { closed = true; };
     getJSON(`/api/markets/${address}/trades?limit=80`).then(r => !closed && setTrades(r.trades)).catch(() => {});
 
     // The server polls the chain for every open stream, so drop it while the tab is hidden and

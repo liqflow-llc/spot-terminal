@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useWallet } from '@solana/wallet-adapter-react';
 import TopBar from './TopBar.jsx';
 import MarketHeader from './MarketHeader.jsx';
@@ -9,7 +9,8 @@ import TradingViewChart from './TradingViewChart.jsx';
 import ErrorBoundary from './ErrorBoundary.jsx';
 import OrderForm from './OrderForm.jsx';
 import AccountPanel from './AccountPanel.jsx';
-import { useMarketStream } from '../hooks/useMarketStream';
+import NoMarketPanel from './NoMarketPanel.jsx';
+import { isPairAddress, useMarketStream } from '../hooks/useMarketStream';
 import { useAccount } from '../hooks/useAccount';
 import './TradePage.css';
 
@@ -24,6 +25,17 @@ export default function TradePage() {
   const [pickedPrice, setPickedPrice] = useState(null);
   const [mobileTab, setMobileTab] = useState('Chart');
   const [orderAction, setOrderAction] = useState(null); // from the chart: { type: 'cancel'|'edit', order, price }
+  const navigate = useNavigate();
+  // A pair with no Manifest market: Jupiter only, the all-DEX chart, and no book or trades.
+  const noMarket = isPairAddress(address);
+
+  // The pair got a Manifest market since this link was made: show that market instead. (Right
+  // after switching, `market` can still be the previous one, so the tokens must match the pair.)
+  useEffect(() => {
+    if (!noMarket || !market || market.noMarket) return;
+    const [baseMint, quoteMint] = address.split('-');
+    if (market.base.mint === baseMint && market.quote.mint === quoteMint) navigate(`/trade/${market.address}`, { replace: true });
+  }, [noMarket, market, address, navigate]);
 
   useEffect(() => {
     if (market) document.title = `${market.last ? market.last.toPrecision(6) : ''} ${market.symbol} · Spot`;
@@ -52,13 +64,14 @@ export default function TradePage() {
       </div>
       <main className={`trade-grid show-${mobileTab.toLowerCase()}`}>
         <section className="panel area-book">
-          <OrderBook book={book} market={market} onPick={pickPrice} />
+          {noMarket ? <NoMarketPanel market={market} /> : <OrderBook book={book} market={market} onPick={pickPrice} />}
         </section>
         <section className="panel area-chart">
           <ErrorBoundary name="chart">
           <TradingViewChart
             address={address}
             market={market}
+            ammOnly={noMarket}
             onTrade={onTrade}
             orders={account?.orders}
             onCancelOrder={(order) => setOrderAction({ type: 'cancel', order, at: Date.now() })}
@@ -70,7 +83,7 @@ export default function TradePage() {
           <OrderForm market={market} book={book} account={account} pickedPrice={pickedPrice} onPlaced={refresh} />
         </section>
         <section className="panel area-trades">
-          <Trades trades={trades} market={market} />
+          <Trades trades={trades} market={market} empty={noMarket ? `No ${market?.symbol || ''} order book yet, so no trades to show here. The chart shows where it trades on other Solana DEXs.` : undefined} />
         </section>
         <section className="panel area-account">
           <AccountPanel account={account} market={market} wallet={wallet} onChange={refresh} action={orderAction} />

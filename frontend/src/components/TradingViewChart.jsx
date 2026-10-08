@@ -58,7 +58,7 @@ const DISABLED_FEATURES = [
 const BID = '#2ebd85', ASK = '#f6465d', MUTED = '#6f7a89';
 const LINE_STATUSES = new Set(['open', 'expired', 'placing', 'replacing']);
 
-export default function TradingViewChart({ address, onTrade, orders = [], onCancelOrder, onMoveOrder }) {
+export default function TradingViewChart({ address, ammOnly = false, onTrade, orders = [], onCancelOrder, onMoveOrder }) {
   const containerRef = useRef(null);
   const widgetRef = useRef(null);
   const readyRef = useRef(false);
@@ -68,8 +68,12 @@ export default function TradingViewChart({ address, onTrade, orders = [], onCanc
   const [error, setError] = useState(null);
   // Which chart: SpotTerminal's own book (the default: what limit orders fill against), or the most
   // active pool for the pair anywhere on Solana.
-  const [source, setSource] = useState('manifest');
+  // A pair with no Manifest market (ammOnly) has only the all-DEX chart.
+  const [chosenSource, setSource] = useState('manifest');
+  const source = ammOnly ? 'amm' : chosenSource;
   const ticker = source === 'amm' ? ammTicker(address) : address;
+  const ammOnlyRef = useRef(ammOnly);
+  ammOnlyRef.current = ammOnly;
   const toggleRef = useRef(null);
   const { theme } = useTheme();
   const themeRef = useRef(theme);    // the theme the chart is showing
@@ -109,7 +113,7 @@ export default function TradingViewChart({ address, onTrade, orders = [], onCanc
         const btn = widget.createButton({ align: 'left' });
         btn.setAttribute('title', 'Manifest: trades on the order book your limit orders rest on. All DEXs: the most active pool for this pair anywhere on Solana (GeckoTerminal), which can pass your limit price briefly without filling it.');
         btn.style.cursor = 'pointer';
-        btn.addEventListener('click', () => setSource(src => (src === 'amm' ? 'manifest' : 'amm')));
+        btn.addEventListener('click', () => { if (!ammOnlyRef.current) setSource(src => (src === 'amm' ? 'manifest' : 'amm')); });
         toggleRef.current = btn;
         setReady(r => r + 1);
       }).catch(err => reportError('chart_toggle_failed', err));
@@ -153,10 +157,18 @@ export default function TradingViewChart({ address, onTrade, orders = [], onCanc
     const btn = toggleRef.current;
     if (!btn) return;
     const on = 'font-weight:600;color:#4c8dff', off = 'opacity:.7';
+    if (ammOnly) {
+      btn.style.cursor = 'default';
+      btn.setAttribute('title', 'No Manifest market for this pair yet, so this is the most active pool for it anywhere on Solana (GeckoTerminal).');
+      btn.innerHTML = `<span style="${on}">All DEXs</span><span style="opacity:.6;padding-left:6px">· no Manifest market yet</span>`;
+      return;
+    }
+    btn.style.cursor = 'pointer';
+    btn.setAttribute('title', 'Manifest: trades on the order book your limit orders rest on. All DEXs: the most active pool for this pair anywhere on Solana (GeckoTerminal), which can pass your limit price briefly without filling it.');
     btn.innerHTML = `<span style="${source === 'manifest' ? on : off}">Manifest</span>`
       + '<span style="opacity:.5;padding:0 6px">|</span>'
       + `<span style="${source === 'amm' ? on : off}">All DEXs</span>`;
-  }, [source, ready]);
+  }, [source, ammOnly, ready]);
 
   // The wallet's open orders as price lines (drag to change the price, ✕ to cancel) and its
   // filled orders as buy/sell markers.

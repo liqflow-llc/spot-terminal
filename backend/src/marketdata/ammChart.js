@@ -4,7 +4,8 @@
 //
 // Pool choice: the pair's own pool with the most 24h volume (not liquidity: some pools report
 // large reserves and barely trade). No pool for the pair: the base token's most active pool,
-// priced in USD, divided by the quote token's USD price at each candle ("via USD").
+// priced in USD, divided by the quote token's USD price at each candle ("via USD"). No active
+// pool at all (a thin token, e.g. one with no Manifest market yet): the pair's deepest quiet pool.
 import { geckoFetch } from './gecko.js';
 import { RESOLUTIONS } from './tradeStore.js';
 import { log } from '../log.js';
@@ -18,17 +19,19 @@ const STABLES = new Set([
     'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
     'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
 ]);
+const active = (p) => p.volume >= MIN_VOLUME_USD;
 const mintOf = (rel) => String(rel?.data?.id || '').replace(/^solana_/, '');
 
 export class AmmChart {
-    constructor({ markets }) {
-        this.markets = markets;
+    /** @param summary async (market) => { baseMint, quoteMint } | null (a Manifest market or a no-market pair) */
+    constructor({ summary }) {
+        this.summary = summary;
         this.sources = new Map(); // market -> { at, source }
         this.pools = new Map();   // token mint -> { at, pools }
         this.cache = new Map();   // url -> { at, bars }
     }
 
-    /** Pools trading `mint`, most active first (excluding Manifest, which is the other chart). */
+    /** Pools trading `mint`, most active first (excluding Manifest, which is the other chart), quiet ones included. */
     async poolsFor(mint) {
         const hit = this.pools.get(mint);
         if (hit && Date.now() - hit.at < SOURCE_TTL_MS) return hit.pools;
@@ -43,7 +46,7 @@ export class AmmChart {
                 volume: Number(p.attributes.volume_usd?.h24) || 0,
                 liquidity: Number(p.attributes.reserve_in_usd) || 0,
             }))
-            .filter(p => !/manifest/i.test(p.dex) && p.volume >= MIN_VOLUME_USD)
+            .filter(p => !/manifest/i.test(p.dex))
             .sort((a, b) => b.volume - a.volume);
         this.pools.set(mint, { at: Date.now(), pools });
         return pools;
@@ -53,17 +56,33 @@ export class AmmChart {
     async source(market) {
         const hit = this.sources.get(market);
         if (hit && Date.now() - hit.at < SOURCE_TTL_MS) return hit.source;
-        const s = this.markets.summary(market);
+        const s = await this.summary(market);
         if (!s) return null;
         let source = null;
-        const basePools = await this.poolsFor(s.baseMint);
-        const pair = basePools.find(p => (p.base === s.baseMint && p.quote === s.quoteMint) || (p.base === s.quoteMint && p.quote === s.baseMint));
+        const allBasePools = await this.poolsFor(s.baseMint);
+        const basePools = allBasePools.filter(active);
+        const isPair = (p) => (p.base === s.baseMint && p.quote === s.quoteMint) || (p.base === s.quoteMint && p.quote === s.baseMint);
+        const pair = basePools.find(isPair);
         if (pair) {
             source = { via: 'pair', pool: pair.address, dex: pair.dex, name: pair.name };
         } else if (basePools[0]) {
-            const quotePool = STABLES.has(s.quoteMint) ? null : (await this.poolsFor(s.quoteMint))[0];
+            const quotePool = STABLES.has(s.quoteMint) ? null : (await this.poolsFor(s.quoteMint)).filter(active)[0];
             if (STABLES.has(s.quoteMint) || quotePool) {
                 source = { via: 'usd', pool: basePools[0].address, dex: basePools[0].dex, name: basePools[0].name, quotePool: quotePool?.address || null };
+            }
+        }
+        if (!source) {
+            // Better a quiet chart than none: the pair's deepest pool whatever its volume, else the
+            // base token's deepest pool priced via USD.
+            const deepest = (list) => list.filter(p => p.liquidity > 0).sort((a, b) => b.liquidity - a.liquidity)[0];
+            const quietPair = deepest(allBasePools.filter(isPair));
+            const quietBase = !quietPair && deepest(allBasePools);
+            if (quietPair) source = { via: 'pair', pool: quietPair.address, dex: quietPair.dex, name: quietPair.name, quiet: true };
+            else if (quietBase) {
+                const quotePool = STABLES.has(s.quoteMint) ? null : (await this.poolsFor(s.quoteMint)).filter(active)[0];
+                if (STABLES.has(s.quoteMint) || quotePool) {
+                    source = { via: 'usd', pool: quietBase.address, dex: quietBase.dex, name: quietBase.name, quotePool: quotePool?.address || null, quiet: true };
+                }
             }
         }
         this.sources.set(market, { at: Date.now(), source });
@@ -88,8 +107,8 @@ export class AmmChart {
     }
 
     /** Candles priced in the market's quote token, oldest first, for TradingView. */
-    async bars(market, resolution, from, to) {
-        const s = this.markets.summary(market);
+    async bars(market, resolution, from, to, countBack = 0) {
+        const s = await this.summary(market);
         const source = await this.source(market);
         if (!s || !source) return { bars: [], source };
         // Gecko pages back from `before`; one page (up to 1000 candles) per request.
@@ -108,6 +127,10 @@ export class AmmChart {
                 });
             }
         }
-        return { bars: bars.filter(b => b.time >= from * 1000 && b.time <= to * 1000), source };
+        const upTo = bars.filter(b => b.time < to * 1000); // `to` is exclusive: the next page starts there
+        const inRange = upTo.filter(b => b.time >= from * 1000);
+        // TradingView's countBack: the bars it wants ending at `to`, even from before `from`. A
+        // quiet pool (weeks between trades) then shows its last candles instead of "no data".
+        return { bars: countBack > inRange.length ? upTo.slice(-countBack) : inRange, source };
     }
 }

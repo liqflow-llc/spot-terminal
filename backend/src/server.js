@@ -40,19 +40,87 @@ const trades = new TradeStore(markets, (market) => {
 trades.setMaxListeners(0);
 const orderStore = new OrderStore();
 const keeperKeypair = loadKeeperKeypair();
-/** Market price for a pair from Jupiter's USD prices (deep, cross-venue), or null if either is unpriced. */
+// A pair with no Manifest market yet ("<baseMint>-<quoteMint>"): traded through Jupiter only, with
+// the all-DEX chart, until someone creates its market.
+const PAIR_RE = /^([1-9A-HJ-NP-Za-km-z]{32,44})-([1-9A-HJ-NP-Za-km-z]{32,44})$/;
+const isPairId = (id) => PAIR_RE.test(String(id || ''));
+/** A summary-shaped stand-in for a pair with no market, or null if either token can't be resolved. */
+async function pairSummary(id) {
+    const m = String(id || '').match(PAIR_RE);
+    if (!m || m[1] === m[2]) return null;
+    const [, baseMint, quoteMint] = m;
+    try {
+        new PublicKey(baseMint);
+        new PublicKey(quoteMint);
+    } catch {
+        return null;
+    }
+    await registry.ensure([baseMint, quoteMint]);
+    for (const mint of [baseMint, quoteMint]) if (!registry.hasDecimals(mint)) await registry.resolve([mint]);
+    if (!registry.hasDecimals(baseMint) || !registry.hasDecimals(quoteMint)) return null;
+    return {
+        address: id, venue: null, noMarket: true, baseMint, quoteMint,
+        baseDecimals: registry.get(baseMint).decimals, quoteDecimals: registry.get(quoteMint).decimals,
+        bestBid: null, bestAsk: null, bidCount: 0, askCount: 0,
+    };
+}
+/** A Manifest market by address, or a no-market pair by "<baseMint>-<quoteMint>". */
+async function resolveMarket(id) {
+    return markets.summary(id) || pairSummary(id);
+}
+
+/**
+ * Market price for a pair from Jupiter's USD prices (deep, cross-venue). Jupiter leaves thin tokens
+ * unpriced (SKIRM, most new tokens) even when it can route them; then the midpoint of a small buy
+ * and a small sell through Jupiter stands in. Null if neither works.
+ */
 async function referencePrice(address) {
-    const s = markets.summary(address);
+    const s = await resolveMarket(address);
     if (!s) return null;
     const prices = await registry.getPrices([s.baseMint, s.quoteMint]);
     const base = prices[s.baseMint], quote = prices[s.quoteMint];
-    return base > 0 && quote > 0 ? base / quote : null;
+    if (base > 0 && quote > 0) return base / quote;
+    return quote > 0 ? swapMidPrice(s, quote) : null;
 }
 
-const ammChart = new AmmChart({ markets });
+const SWAP_MID_USD = 5; // small enough to barely move a thin pool, big enough to clear its rounding
+const SWAP_MID_TTL_MS = 60_000;
+const swapMids = new Map(); // `${base}|${quote}` -> { at, price: Promise }
+/**
+ * Quote per base from a ~$5 buy and a sell of what it bought, both through Jupiter. Cached, and
+ * shared while in flight: the page, the chart and the order form all ask at once.
+ */
+function swapMidPrice(s, quoteUsd) {
+    const key = `${s.baseMint}|${s.quoteMint}`;
+    const hit = swapMids.get(key);
+    if (hit && Date.now() - hit.at < SWAP_MID_TTL_MS) return hit.price;
+    const price = fetchSwapMid(s, quoteUsd);
+    swapMids.set(key, { at: Date.now(), price });
+    if (swapMids.size > 500) swapMids.delete(swapMids.keys().next().value);
+    return price;
+}
+async function fetchSwapMid(s, quoteUsd) {
+    let price = null;
+    try {
+        const taker = keeperKeypair.publicKey.toBase58();
+        const build = (inMint, outMint, amount) => registry.jupFetch(`/swap/v2/build?inputMint=${inMint}&outputMint=${outMint}&amount=${amount}&slippageBps=50&taker=${taker}`);
+        const quoteIn = BigInt(Math.max(1, Math.round((SWAP_MID_USD / quoteUsd) * 10 ** s.quoteDecimals)));
+        const buy = await build(s.quoteMint, s.baseMint, quoteIn);
+        const sell = await build(s.baseMint, s.quoteMint, buy.outAmount);
+        const scale = 10 ** (s.baseDecimals - s.quoteDecimals);
+        const buyPrice = (Number(buy.inAmount) / Number(buy.outAmount)) * scale;
+        const sellPrice = (Number(sell.outAmount) / Number(sell.inAmount)) * scale;
+        if (buyPrice > 0 && sellPrice > 0) price = Math.sqrt(buyPrice * sellPrice);
+    } catch {
+        // No route (or Jupiter is down): no price, as before.
+    }
+    return price;
+}
+
+const ammChart = new AmmChart({ summary: resolveMarket });
 const ledger = new Ledger(); // what moved into / out of SpotTerminal, for the tax exports
 const orders = new OrderService({
-    markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey, referencePrice, ledger,
+    markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey, referencePrice, ledger, resolveMarket,
     jupiter: (path, init) => registry.jupFetch(path, init),
     usdPrices: (mints) => registry.getPrices(mints),
 });
@@ -220,6 +288,31 @@ function requireMarket(req, res) {
     }
     return s;
 }
+/** requireMarket for the routes that also serve a no-market pair (price, chart, token warnings). */
+async function requireMarketOrPair(req, res) {
+    const s = await resolveMarket(req.params.address);
+    if (!s) res.status(404).json({ error: 'Market not found' });
+    return s;
+}
+
+/** A no-market pair as the frontend sees a market: Jupiter's price, no book, no stats of its own. */
+function pairView(s, reference = null) {
+    const base = registry.display(s.baseMint);
+    const quote = registry.display(s.quoteMint);
+    const last = reference ?? (base.usdPrice > 0 && quote.usdPrice > 0 ? base.usdPrice / quote.usdPrice : null);
+    return {
+        address: s.address,
+        venue: null,
+        noMarket: true,
+        symbol: `${base.symbol}/${quote.symbol}`,
+        category: marketCategory(base, quote, s.baseMint),
+        base: { mint: s.baseMint, symbol: base.symbol, name: base.name, icon: base.icon, decimals: s.baseDecimals, verified: base.verified, usdPrice: base.usdPrice },
+        quote: { mint: s.quoteMint, symbol: quote.symbol, name: quote.name, icon: quote.icon, decimals: s.quoteDecimals, verified: quote.verified, usdPrice: quote.usdPrice },
+        bestBid: null, bestAsk: null, last,
+        change24h: null, high24h: null, low24h: null, volume24hQuote: null, volume24hUsd: null, volumeWindowHours: null,
+        orders: 0,
+    };
+}
 
 const app = express();
 // One address for search engines and links: www.spotterminal.com -> spotterminal.com.
@@ -307,9 +400,17 @@ app.get('/api/markets', (req, res) => {
     res.json({ markets: list.slice(0, limit), total: list.length });
 });
 
-app.get('/api/markets/:address', (req, res) => {
-    const s = requireMarket(req, res);
-    if (s) res.json(marketView(s, { withHiLo: true }));
+const pairLimit = rateLimit('pair', 60, 60_000); // a new pair may cost token lookups
+app.get('/api/markets/:address', (req, res, next) => (markets.summary(req.params.address) ? next() : pairLimit(req, res, next)), async (req, res) => {
+    if (markets.summary(req.params.address)) return res.json(marketView(markets.summary(req.params.address), { withHiLo: true }));
+    const s = await requireMarketOrPair(req, res);
+    if (!s) return;
+    // The pair got a Manifest market since the link was made: that market (the page switches to it).
+    const existing = markets.marketsForPair(s.baseMint, s.quoteMint).find(m => m.baseMint === s.baseMint);
+    if (existing) return res.json(marketView(existing, { withHiLo: true }));
+    const reference = await referencePrice(s.address).catch(() => null);
+    res.set('Cache-Control', 'no-cache');
+    res.json(pairView(s, reference));
 });
 
 app.get('/api/markets/:address/book', (req, res) => {
@@ -320,7 +421,7 @@ app.get('/api/markets/:address/book', (req, res) => {
 });
 
 app.get('/api/markets/:address/reference', rateLimit('reference', 60, 60_000), async (req, res) => {
-    if (!requireMarket(req, res)) return;
+    if (!await requireMarketOrPair(req, res)) return;
     try {
         res.set('Cache-Control', 'no-cache');
         res.json({ price: await referencePrice(req.params.address), source: 'Jupiter', at: Date.now() });
@@ -331,10 +432,10 @@ app.get('/api/markets/:address/reference', rateLimit('reference', 60, 60_000), a
 
 // Token safety warnings for the order form (unverified tokens only; see tokens/tokenRisk.js).
 app.get('/api/markets/:address/risk', rateLimit('risk', 30, 60_000), async (req, res) => {
-    const s = requireMarket(req, res);
+    const s = await requireMarketOrPair(req, res);
     if (!s) return;
     try {
-        const v = marketView(s);
+        const v = s.noMarket ? pairView(s) : marketView(s);
         const [base, quote] = await Promise.all([
             tokenWarnings(registry, s.baseMint, v.base.symbol),
             tokenWarnings(registry, s.quoteMint, v.quote.symbol),
@@ -359,7 +460,7 @@ app.get('/api/markets/:address/trades', (req, res) => {
 
 // The all-Solana chart (most active pool anywhere, via GeckoTerminal): marketdata/ammChart.js.
 app.get('/api/markets/:address/amm-source', rateLimit('candles', 60, 60_000), async (req, res) => {
-    if (!requireMarket(req, res)) return;
+    if (!await requireMarketOrPair(req, res)) return;
     try {
         res.json({ source: await ammChart.source(req.params.address) });
     } catch (err) {
@@ -368,10 +469,11 @@ app.get('/api/markets/:address/amm-source', rateLimit('candles', 60, 60_000), as
     }
 });
 app.get('/api/markets/:address/amm-candles', rateLimit('candles', 60, 60_000), async (req, res) => {
-    if (!requireMarket(req, res)) return;
+    if (!await requireMarketOrPair(req, res)) return;
     const { resolution, from, to } = req.query;
+    const countBack = Math.min(1000, Math.max(0, Number(req.query.countBack) || 0));
     try {
-        res.json(await ammChart.bars(req.params.address, resolution, Number(from), Number(to)));
+        res.json(await ammChart.bars(req.params.address, resolution, Number(from), Number(to), countBack));
     } catch (err) {
         log.warn('amm-chart', 'candles_failed', { market: short(req.params.address), msg: err.message });
         res.status(502).json({ error: 'Market data provider unavailable, try again shortly.' });
@@ -467,7 +569,7 @@ app.get('/api/account', rateLimit('account', 40, 60_000), async (req, res) => {
     }
     const wallet = walletPk.toBase58();
     const address = String(req.query.market || '');
-    const s = markets.summary(address);
+    const s = markets.summary(address) || (isPairId(address) ? await pairSummary(address) : null);
     const out = { orders: orderStore.forWallet(wallet).slice(0, 100).map(publicOrder), wallet: null, inMarket: null };
     if (s) {
         const market = markets.get(address);
@@ -536,7 +638,9 @@ const handle = (fn) => async (req, res) => {
 
 const writeLimit = rateLimit('write', 30, 60_000);
 // takeViaJupiter: fill what Jupiter can beat the limit by first, rest the remainder here.
-app.post('/api/orders/prepare', writeLimit, handle(body => (body.takeViaJupiter && !body.postOnly ? orders.prepareSmartLimit(body) : orders.prepareOrder(body))));
+// A pair with no Manifest market: the limit fills through Jupiter in full, or not at all.
+app.post('/api/orders/prepare', writeLimit, handle(body => (!markets.summary(body.market) && isPairId(body.market) ? orders.prepareJupiterLimit(body)
+    : body.takeViaJupiter && !body.postOnly ? orders.prepareSmartLimit(body) : orders.prepareOrder(body))));
 app.post('/api/orders/cancel', writeLimit, handle(body => orders.prepareCancel(body)));
 app.post('/api/orders/edit', writeLimit, handle(body => orders.prepareEdit(body)));
 app.post('/api/orders/cancel-all', writeLimit, handle(body => orders.prepareCancelAll(body)));
@@ -742,8 +846,8 @@ const siteOrigin = (req) => config.publicUrl || `https://${req.get('host')}`;
 /** A real page (200) or not (404, so search engines don't list made-up URLs as pages). */
 function pageExists(req) {
     if (req.path === '/' || PAGE_TITLES[req.path] || NOINDEX.has(req.path)) return true;
-    const m = req.path.match(/^\/trade\/([1-9A-HJ-NP-Za-km-z]{32,44})$/);
-    return !!(m && markets.summary(m[1]));
+    const m = req.path.match(/^\/trade\/([1-9A-HJ-NP-Za-km-z]{32,44}(?:-[1-9A-HJ-NP-Za-km-z]{32,44})?)$/);
+    return !!(m && (markets.summary(m[1]) || (isPairId(m[1]) && registry.hasDecimals(m[1].split('-')[0]))));
 }
 
 app.get('/robots.txt', (req, res) => {
@@ -794,6 +898,14 @@ function pageMeta(req) {
             description: `Trade ${v.base.name || v.base.symbol} (${v.symbol}) on Solana order books${price ? `: ${[price, change].filter(Boolean).join(', ')}` : ''}. Zero trading fees; limit orders pay out to your wallet automatically.`,
         };
     }
+    const pair = req.path.match(/^\/trade\/(.+)$/)?.[1];
+    if (isPairId(pair)) {
+        const [base, quote] = pair.split('-').map(mint => registry.display(mint));
+        return {
+            title: `${base.symbol}/${quote.symbol} · ${brand}`,
+            description: `Buy and sell ${base.name || base.symbol} (${base.symbol}/${quote.symbol}) on Solana at the best price across every DEX, or open its zero-fee order book.`,
+        };
+    }
     const page = PAGE_TITLES[req.path];
     return { title: page ? `${page} · ${brand}` : `${brand} · Solana order books`, description: DEFAULT_DESCRIPTION };
 }
@@ -822,7 +934,7 @@ function renderIndex(html, req, { found = true } = {}) {
         `<meta name="twitter:title" content="${escapeHtml(title)}" />`,
         `<meta name="twitter:description" content="${escapeHtml(description)}" />`,
         `<meta name="twitter:image" content="${escapeHtml(image)}" />`,
-        ...(!found || NOINDEX.has(req.path) ? ['<meta name="robots" content="noindex" />'] : []),
+        ...(!found || NOINDEX.has(req.path) || isPairId(req.path.slice('/trade/'.length)) ? ['<meta name="robots" content="noindex" />'] : []),
         // What the site is, for search results (schema.org).
         ...(req.path === '/' ? [`<script type="application/ld+json">${JSON.stringify({
             '@context': 'https://schema.org',

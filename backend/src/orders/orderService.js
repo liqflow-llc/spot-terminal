@@ -204,9 +204,11 @@ function parseMint(mint) {
 }
 
 export class OrderService {
-    constructor({ markets, store, keeperPubkey, referencePrice = null, jupiter = null, usdPrices = null, ledger = null }) {
+    constructor({ markets, store, keeperPubkey, referencePrice = null, jupiter = null, usdPrices = null, ledger = null, resolveMarket = null }) {
         this.ledger = ledger; // what moved into / out of SpotTerminal, for tax exports (orders/ledger.js)
         this.markets = markets;
+        // Swaps also work on a pair with no Manifest market ("<baseMint>-<quoteMint>").
+        this.resolveMarket = resolveMarket || (async (address) => markets.summary(address));
         this.usdPrices = usdPrices; // async (mints) => { mint: usd } (to value transaction fees)
         this.jupiter = jupiter; // (pathAndQuery, { method, body }) => Promise<json>, rate limited
         this.referencePrice = referencePrice; // async (marketAddress) => price | null
@@ -824,25 +826,9 @@ export class OrderService {
         const reserve = isNativeMint(spendMint) ? 20_000_000n : 0n;
         if (take.inAtoms + restLock + reserve > have) throw new UserError('Insufficient balance for this order.');
 
-        const swapTx = buildJupiterTransaction(take.quote, walletPk);
-        if (!fitsInPacket(swapTx)) return this.prepareOrder({ ...params, acknowledgePriceRisk: true });
-        await this.simulateOrThrow(swapTx);
-        const swapResult = {
-            inAmount: Number(take.inAtoms) / 10 ** (isBuy ? s.quoteDecimals : s.baseDecimals),
-            outAmount: Number(take.outAtoms) / 10 ** (isBuy ? s.baseDecimals : s.quoteDecimals),
-        };
-        swapResult.price = isBuy ? swapResult.inAmount / swapResult.outAmount : swapResult.outAmount / swapResult.inAmount;
-        // Including the transaction fee, as the limit check does.
-        swapResult.allInPrice = isBuy
-            ? (swapResult.inAmount + take.feeQuote) / swapResult.outAmount
-            : (swapResult.outAmount - take.feeQuote) / swapResult.inAmount;
-        const swapPart = {
-            message: Buffer.from(swapTx.message.serialize()),
-            b64: Buffer.from(swapTx.serialize()).toString('base64'),
-            blockhash: swapTx.message.recentBlockhash,
-            lastValidBlockHeight: take.quote.blockhashWithMetadata.lastValidBlockHeight,
-            result: swapResult,
-        };
+        const swapPart = await this.buildTakeSwap(walletPk, s, side, take);
+        if (!swapPart) return this.prepareOrder({ ...params, acknowledgePriceRisk: true });
+        const swapResult = swapPart.result;
 
         let orderPrepared = null, orderPending = null;
         if (restAtoms > 0n) {
@@ -874,6 +860,105 @@ export class OrderService {
                 title: 'Limit order',
                 now: swapResult,
                 restSize: Number(restAtoms) / 10 ** s.baseDecimals,
+                limit,
+                networkFee: take.feeQuote,
+                venues: [...new Set((take.quote.routePlan || []).map(r => r.swapInfo?.label).filter(Boolean))],
+            },
+        };
+    }
+
+    /** The signed-ready swap for a Jupiter take (simulated), or null if it doesn't fit in a transaction. */
+    async buildTakeSwap(walletPk, s, side, take) {
+        const isBuy = side === 'buy';
+        const swapTx = buildJupiterTransaction(take.quote, walletPk);
+        if (!fitsInPacket(swapTx)) return null;
+        await this.simulateOrThrow(swapTx);
+        const result = {
+            inAmount: Number(take.inAtoms) / 10 ** (isBuy ? s.quoteDecimals : s.baseDecimals),
+            outAmount: Number(take.outAtoms) / 10 ** (isBuy ? s.baseDecimals : s.quoteDecimals),
+        };
+        result.price = isBuy ? result.inAmount / result.outAmount : result.outAmount / result.inAmount;
+        // Including the transaction fee, as the limit check does.
+        result.allInPrice = isBuy
+            ? (result.inAmount + take.feeQuote) / result.outAmount
+            : (result.outAmount - take.feeQuote) / result.inAmount;
+        return {
+            message: Buffer.from(swapTx.message.serialize()),
+            b64: Buffer.from(swapTx.serialize()).toString('base64'),
+            blockhash: swapTx.message.recentBlockhash,
+            lastValidBlockHeight: take.quote.blockhashWithMetadata.lastValidBlockHeight,
+            result,
+        };
+    }
+
+    /**
+     * A limit order on a pair with no Manifest market: there's no book for any of it to rest on,
+     * so it goes through only if Jupiter can fill ALL of it at an average at or better than the
+     * limit (the swap's minimum output guarantees that). Otherwise nothing is sent and the answer
+     * says how much Jupiter could fill ({ step: 'unfillable' }), so the user can create the market
+     * and rest the order there, or use a market order.
+     */
+    async prepareJupiterLimit({ wallet, market, side, price, size, acknowledgePriceRisk = false }) {
+        const walletPk = parseWallet(wallet);
+        if (side !== 'buy' && side !== 'sell') throw new UserError('side must be buy or sell');
+        const limit = Number(price);
+        if (!(limit > 0)) throw new UserError('Enter a price above zero');
+        if (!this.jupiter) throw new UserError('Trading this pair is unavailable right now');
+        const s = await this.resolveMarket(market);
+        if (!s) throw new UserError('Unknown market');
+        const sizeAtoms = toAtoms(size, s.baseDecimals);
+        if (sizeAtoms <= 0n) throw new UserError('Enter an amount');
+        await this.checkPriceRisk(market, side, limit, acknowledgePriceRisk);
+
+        const prices = this.usdPrices ? await this.usdPrices([NATIVE_MINT.toBase58(), s.quoteMint]).catch(() => ({})) : {};
+        const solInQuote = isNativeMint(s.quoteMint) ? 1 : (prices[NATIVE_MINT.toBase58()] > 0 && prices[s.quoteMint] > 0 ? prices[NATIVE_MINT.toBase58()] / prices[s.quoteMint] : null);
+        if (solInQuote == null) throw new UserError('No price for this pair on Jupiter right now, so a limit can\'t be checked. Use a market order.');
+        let take;
+        try {
+            take = await this.findJupiterTake({ side, limit, sizeAtoms, s, taker: walletPk.toBase58(), solInQuote });
+        } catch (err) {
+            // Busy or down is not "can't fill": don't send people off to create a market over it.
+            log.warn('orders', 'jupiter_limit_take_failed', { market: short(market), msg: err.message });
+            if (err.status === 400 || err.status === 404) take = null; // no route at all
+            else throw new UserError('Couldn\'t reach Jupiter just now, so nothing was placed. Please try again in a moment.');
+        }
+        const isBuy = side === 'buy';
+        // A buy is sized to come out at about the size; within 0.1% counts as all of it.
+        if (!take || take.baseAtoms * 1000n < sizeAtoms * 999n) {
+            const reference = this.referencePrice ? await this.referencePrice(market).catch(() => null) : null;
+            return {
+                step: 'unfillable',
+                size: Number(sizeAtoms) / 10 ** s.baseDecimals,
+                fillable: take ? Number(take.baseAtoms) / 10 ** s.baseDecimals : 0,
+                limit,
+                reference,
+            };
+        }
+
+        const spendMint = isBuy ? s.quoteMint : s.baseMint;
+        const spendProgram = (await connection.getAccountInfo(new PublicKey(spendMint), 'confirmed'))?.owner;
+        const lamports = await connection.getBalance(walletPk, 'confirmed');
+        const have = await this.tokenBalanceAtoms(walletPk, spendMint, spendProgram, lamports);
+        const reserve = isNativeMint(spendMint) ? 20_000_000n : 0n;
+        if (take.inAtoms + reserve > have) throw new UserError('Insufficient balance for this order.');
+        const swapPart = await this.buildTakeSwap(walletPk, s, side, take);
+        if (!swapPart) throw new UserError('Could not fit this trade in one transaction. Try a smaller amount.');
+
+        const id = crypto.randomUUID();
+        this.pending.set(id, {
+            kind: 'swap', versioned: true, wallet: walletPk.toBase58(), createdAt: Date.now(),
+            messages: [swapPart.message],
+            blockhash: swapPart.blockhash, lastValidBlockHeight: swapPart.lastValidBlockHeight,
+            result: swapPart.result,
+        });
+        return {
+            step: 'sign',
+            id,
+            versioned: true,
+            transactions: [swapPart.b64],
+            summary: {
+                title: `Limit ${side}`,
+                now: swapPart.result,
                 limit,
                 networkFee: take.feeQuote,
                 venues: [...new Set((take.quote.routePlan || []).map(r => r.swapInfo?.label).filter(Boolean))],
@@ -962,7 +1047,7 @@ export class OrderService {
     async quoteSwap({ market, side, amount, slippageBps = 50, wallet = null, maxAccounts = null }) {
         if (!this.jupiter) throw new UserError('Market orders are unavailable');
         if (side !== 'buy' && side !== 'sell') throw new UserError('side must be buy or sell');
-        const s = this.markets.summary(market);
+        const s = await this.resolveMarket(market);
         if (!s) throw new UserError('Unknown market');
         const slippage = Math.round(Number(slippageBps));
         if (!(slippage >= 1 && slippage <= MAX_SLIPPAGE_BPS)) throw new UserError(`Slippage must be between 0.01% and ${MAX_SLIPPAGE_BPS / 100}%`);
@@ -1003,7 +1088,8 @@ export class OrderService {
             quote,
             summary: {
                 side, inAmount: inUi, outAmount: outUi, minOut: minOutUi, price, worstPrice,
-                priceImpact: Number(quote.priceImpactPct) || 0,
+                // Jupiter says "1" (100%) when it can't value a token: that means unknown, not 100%.
+                priceImpact: Number(quote.priceImpactPct) >= 0.999 ? null : (Number(quote.priceImpactPct) || 0),
                 reference, deviation: adverseDeviation(side, worstPrice, reference),
                 venues, slippageBps: slippage,
             },
@@ -1024,7 +1110,7 @@ export class OrderService {
         }
         if (!tx) throw new UserError('Could not fit this trade in one transaction. Try a smaller amount.');
         // Judge the WORST price the order allows (slippage included), not the hoped-for one.
-        const off = Math.max(summary.deviation ?? -1, summary.priceImpact);
+        const off = Math.max(summary.deviation ?? -1, summary.priceImpact ?? -1);
         if (!acknowledgePriceRisk && off > PRICE_WARN_DEVIATION) {
             const err = new UserError(`This market order could fill up to ${(off * 100).toFixed(1)}% worse than the market price. Confirm the price warning to place it anyway.`);
             err.code = 'PRICE_DEVIATION';
@@ -1081,7 +1167,7 @@ export class OrderService {
         if (sim.value.err) {
             const hint = (sim.value.logs || []).filter(l => /Error|error|insufficient|failed/.test(l)).slice(-3).join(' | ');
             log.warn('orders', 'create_market_simulation_failed', { err: sim.value.err, hint });
-            throw new UserError(walletInfo && walletInfo.lamports < 10_000_000
+            throw new UserError(!walletInfo || walletInfo.lamports < 10_000_000
                 ? 'Not enough SOL in your wallet to create a market.'
                 : `Creating the market would fail on-chain: ${hint || JSON.stringify(sim.value.err)}`);
         }

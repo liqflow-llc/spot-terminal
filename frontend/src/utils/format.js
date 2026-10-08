@@ -28,6 +28,7 @@ export function formatUsd(value) {
   if (Math.abs(value) >= 1e9) return `$${(value / 1e9).toFixed(2)}B`;
   if (Math.abs(value) >= 1e6) return `$${(value / 1e6).toFixed(2)}M`;
   if (Math.abs(value) >= 1e3) return `$${(value / 1e3).toFixed(1)}K`;
+  if (value !== 0 && Math.abs(value) < 0.01) return `$${formatPrice(value)}`; // tiny token prices
   return `$${value.toFixed(2)}`;
 }
 

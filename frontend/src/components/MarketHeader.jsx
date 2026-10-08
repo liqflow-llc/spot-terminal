@@ -4,12 +4,14 @@ import TokenIcon from './TokenIcon.jsx';
 import CreateMarketModal from './CreateMarketModal.jsx';
 import { getJSON } from '../services/api';
 import { useFavorites } from '../hooks/useFavorites';
+import { pairAddress } from '../hooks/useMarketStream';
 import { formatPct, formatPrice, formatUsd, formatAmount, shortAddress } from '../utils/format';
 import './MarketHeader.css';
 import { VENUE_INFO } from '../venues';
 import Tooltip from './Tooltip.jsx';
 
 const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 const SORTS = {
   pair: (a, b) => a.symbol.localeCompare(b.symbol),
@@ -221,6 +223,15 @@ function MarketSelector({ market }) {
                   <TokenIcon token={token.token} size={18} />
                   <span>No {token.token.symbol}/{creatable.map(x => x.symbol).join(', ')} market yet</span>
                 </div>
+                <div className="selector-create-sub muted">Trade now at the best price across every Solana DEX, via Jupiter:</div>
+                <div className="selector-create-actions">
+                  {creatable.map(x => (
+                    <button key={x.mint} type="button" className="btn small primary" onClick={() => go(pairAddress(token.token.mint, x.mint))}>
+                      Trade {token.token.symbol}/{x.symbol}
+                    </button>
+                  ))}
+                </div>
+                <div className="selector-create-sub muted">Or create its order book (for limit orders that wait for their price):</div>
                 <div className="selector-create-actions">
                   {creatable.map(x => (
                     <button key={x.mint} type="button" className="btn small" onClick={() => startCreate(token.token.mint, x.symbol)}>
@@ -240,6 +251,7 @@ function MarketSelector({ market }) {
                   <div key={t.mint} className="selector-nomarket">
                     <TokenIcon token={t} size={18} />
                     <span className="selector-nomarket-name"><strong>{t.symbol}</strong> <span className="muted">{t.name}</span></span>
+                    <button type="button" className="btn small primary" title={`Trade ${t.symbol}/SOL via Jupiter`} onClick={() => go(pairAddress(t.mint, SOL_MINT))}>Trade</button>
                     <button type="button" className="btn small" onClick={() => startCreate(t.mint)}>Create market</button>
                   </div>
                 ))}
@@ -272,8 +284,18 @@ export default function MarketHeader({ market }) {
   return (
     <div className="market-header">
       <MarketSelector market={market} />
-      {market && <Star on={isFavorite(market.address)} onClick={() => toggle(market.address)} size={18} />}
-      {market && (
+      {market && !market.noMarket && <Star on={isFavorite(market.address)} onClick={() => toggle(market.address)} size={18} />}
+      {market?.noMarket && (
+        <div className="stats">
+          <div className="stat-last num">
+            {formatPrice(market.last)}
+            {market.quote.usdPrice && market.last ? <span className="stat-usd">≈ {formatUsd(market.last * market.quote.usdPrice)}</span> : null}
+          </div>
+          <Stat label="Venue" value="Jupiter · no order book yet" title="No Manifest market for this pair yet. Trades go through Jupiter at the best price across every Solana DEX, and the price shown is Jupiter's. Create the market to get a zero-fee order book for limit orders." />
+          <TokenAddress token={market.base} />
+        </div>
+      )}
+      {market && !market.noMarket && (
         <div className="stats">
           <div className={`stat-last num ${tick}`}>
             {formatPrice(market.last)}
@@ -308,7 +330,7 @@ function TokenAddress({ token, market }) {
     }
   };
   return (
-    <div className="stat token-address" title={`${token.symbol} token: ${token.mint}\nManifest market: ${market}`}>
+    <div className="stat token-address" title={`${token.symbol} token: ${token.mint}${market ? `\nManifest market: ${market}` : ''}`}>
       <span className="stat-label">{token.symbol} address</span>
       <span className="stat-value num">
         <a href={`https://solscan.io/token/${token.mint}`} target="_blank" rel="noreferrer">{shortAddress(token.mint)}</a>

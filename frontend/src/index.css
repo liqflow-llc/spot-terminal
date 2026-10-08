@@ -130,6 +130,7 @@ input { font: inherit; color: inherit; }
 .btn:hover { border-color: var(--accent); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn.small { height: 26px; padding: 0 8px; font-size: 12px; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 
 .spinner {
   display: inline-block;

@@ -4,14 +4,14 @@ import './OrderBook.css'; // venue badge style
 import { VENUE_INFO } from '../venues';
 import Tooltip from './Tooltip.jsx';
 
-export default function Trades({ trades, market }) {
+export default function Trades({ trades, market, empty }) {
   const decimals = priceDecimals(market?.last ?? trades[0]?.price);
   return (
     <>
       <div className="panel-title"><span>Market trades</span></div>
       <div className="tr-head"><span>Price ({market?.quote.symbol || '—'})</span><span>Amount ({market?.base.symbol || '—'})</span><span>Time</span></div>
       <div className="tr-body">
-        {!trades.length && <div className="tr-empty muted">No trades yet. New fills appear here live.</div>}
+        {!trades.length && <div className="tr-empty muted">{empty || 'No trades yet. New fills appear here live.'}</div>}
         {trades.map((t, i) => {
           const cells = (
             <>

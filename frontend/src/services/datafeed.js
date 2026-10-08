@@ -9,6 +9,7 @@ import { priceDecimals } from '../utils/format';
 const RESOLUTION_MS = { 1: 60e3, 5: 300e3, 15: 900e3, 60: 3600e3, 240: 14400e3, '1D': 86400e3 };
 const AMM = '~amm';
 const AMM_TICK_MS = 15_000;
+const SOURCE_WAIT_MS = 3000;
 const DEX_NAMES = { orca: 'Orca', raydium: 'Raydium', 'raydium-clmm': 'Raydium CLMM', 'raydium-cp': 'Raydium CPMM', meteora: 'Meteora', 'meteora-dlmm': 'Meteora DLMM', pumpswap: 'PumpSwap', phoenix: 'Phoenix', lifinity: 'Lifinity' };
 const dexName = (id) => DEX_NAMES[id] || (id ? id.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : '');
 
@@ -43,10 +44,16 @@ export function createDatafeed(subscribeTrades) {
         const decimals = priceDecimals(m.last ?? m.bestBid ?? m.bestAsk);
         let exchange = 'Manifest';
         if (amm) {
-          const { source } = await getJSON(`/api/markets/${address}/amm-source`).catch(() => ({ source: null }));
-          exchange = !source ? 'All DEXs (no active pool found)'
-            : source.via === 'pair' ? `All DEXs · most active pool: ${dexName(source.dex)}`
-              : `All DEXs · ${dexName(source.dex)}, priced via USD`;
+          // The pool only names the chart: don't hold the chart up on a slow lookup (GeckoTerminal is
+          // rate limited, and TradingView gives up on a symbol that takes too long to resolve).
+          const { source } = await Promise.race([
+            getJSON(`/api/markets/${address}/amm-source`).catch(() => ({ source: null })),
+            new Promise(r => setTimeout(() => r({ source: undefined }), SOURCE_WAIT_MS)),
+          ]);
+          exchange = source === undefined ? 'All DEXs'
+            : !source ? 'All DEXs (no active pool found)'
+            : source.via === 'pair' ? (source.quiet ? `All DEXs · ${dexName(source.dex)} (low volume)` : `All DEXs · most active pool: ${dexName(source.dex)}`)
+              : `All DEXs · ${dexName(source.dex)}, priced via USD${source.quiet ? ' (low volume)' : ''}`;
         }
         onResolve({
           name: m.symbol,
@@ -73,10 +80,11 @@ export function createDatafeed(subscribeTrades) {
     },
 
     async getBars(symbolInfo, resolution, periodParams, onResult, onError) {
-      const { from, to, firstDataRequest } = periodParams;
+      const { from, to, firstDataRequest, countBack } = periodParams;
       try {
         const { address, amm } = parseTicker(symbolInfo.ticker);
-        const { bars } = await getJSON(`/api/markets/${address}/${amm ? 'amm-candles' : 'candles'}?resolution=${resolution}&from=${from}&to=${to}`);
+        // countBack (all-DEX chart): a quiet pool's last candles may be weeks before `from`.
+        const { bars } = await getJSON(`/api/markets/${address}/${amm ? `amm-candles?countBack=${countBack || 0}&` : 'candles?'}resolution=${resolution}&from=${from}&to=${to}`);
         if (firstDataRequest && bars.length) lastBars.set(`${symbolInfo.ticker}|${resolution}`, { ...bars.at(-1) });
         onResult(bars, { noData: bars.length === 0 });
       } catch (err) {

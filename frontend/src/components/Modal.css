@@ -4,7 +4,8 @@
 .modal-body { color: var(--text-2); line-height: 1.55; }
 .modal-body p { margin: 0 0 10px; }
 .modal-body ul { margin: 0 0 10px; padding-left: 18px; }
-.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.modal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.modal-actions .btn { white-space: nowrap; }
 .modal-actions .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 
 .modal.danger { border-color: var(--ask); }

@@ -26,7 +26,7 @@ const VENUE_NAMES = { 'Manifest': 'Manifest', 'Archer': 'Archer' };
  * Archer, AMMs), routed by Jupiter. Buys are entered as an amount to spend, sells as an amount
  * to sell; the slippage limit caps the worst price.
  */
-export default function MarketOrder({ market, side, account, onPlaced }) {
+export default function MarketOrder({ market, side, account, onPlaced, prefill = null }) {
   const { publicKey, signAllTransactions } = useWallet();
   const { setVisible } = useWalletModal();
   const toast = useToast();
@@ -41,6 +41,11 @@ export default function MarketOrder({ market, side, account, onPlaced }) {
   const inToken = isBuy ? quoteToken : base, outToken = isBuy ? base : quoteToken;
 
   useEffect(() => setAmount(''), [market.address, side]);
+  // Sent here from a limit order that couldn't fill (prefill.amount is in the token spent).
+  useEffect(() => {
+    if (prefill?.amount) setAmount(toInputString(prefill.amount, inToken.decimals));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill]);
 
   // Only wallet balances count: a swap can't spend funds sitting in a Manifest market.
   const available = useMemo(() => {
@@ -69,7 +74,8 @@ export default function MarketOrder({ market, side, account, onPlaced }) {
 
   const q = quote?.key === key ? quote.summary : null;
   const quoteError = quote?.key === key ? quote.error : null;
-  const worst = q ? Math.max(q.deviation ?? -1, q.priceImpact) : null;
+  // priceImpact is null when Jupiter can't value a token; the deviation from the market price still counts.
+  const worst = q ? Math.max(q.deviation ?? -1, q.priceImpact ?? -1) : null;
   const risky = worst != null && worst > WARN_DEVIATION;
   const insufficient = available != null && a > available + 1e-12;
   const badSlippage = customSlippage !== '' && !(Number(customSlippage) > 0 && Number(customSlippage) <= MAX_SLIPPAGE_PCT);
@@ -168,7 +174,7 @@ export default function MarketOrder({ market, side, account, onPlaced }) {
       {risky && (
         <div className="of-note danger" role="alert">
           <strong>⚠ Up to {(worst * 100).toFixed(1)}% worse than the market price.</strong>{' '}
-          {q.priceImpact > WARN_DEVIATION ? 'This order is large for the available liquidity.' : 'Check the amount and slippage.'}
+          {(q.priceImpact ?? 0) > WARN_DEVIATION ? 'This order is large for the available liquidity.' : 'Check the amount and slippage.'}
         </div>
       )}
 
@@ -187,7 +193,7 @@ export default function MarketOrder({ market, side, account, onPlaced }) {
         <div><dt>You receive (est.)</dt><dd className="num">{q ? `${formatAmount(q.outAmount)} ${outToken.symbol}` : '—'}</dd></div>
         <div><dt>At least</dt><dd className="num">{q ? `${formatAmount(q.minOut)} ${outToken.symbol}` : '—'}</dd></div>
         <div><dt>Avg price</dt><dd className="num">{q?.price ? `${formatPrice(q.price)} ${quoteToken.symbol}` : '—'}</dd></div>
-        <div><dt>Price impact</dt><dd className={`num ${q && q.priceImpact > 0.01 ? 'warn-text' : ''}`}>{q ? `${(q.priceImpact * 100).toFixed(2)}%` : '—'}</dd></div>
+        <div><dt>Price impact</dt><dd className={`num ${q && q.priceImpact > 0.01 ? 'warn-text' : ''}`} title={q && q.priceImpact == null ? 'Jupiter has no USD price for this token, so it can\'t estimate the impact. The market price warning still applies.' : undefined}>{!q ? '—' : q.priceImpact == null ? 'unknown' : `${(q.priceImpact * 100).toFixed(2)}%`}</dd></div>
         <div><dt>Route</dt><dd>{q?.venues?.length ? q.venues.map(v => VENUE_NAMES[v] || v).join(' + ') : '—'} <span className="muted">via Jupiter</span></dd></div>
         <div><dt>Payout</dt><dd>Straight to your wallet</dd></div>
       </dl>
