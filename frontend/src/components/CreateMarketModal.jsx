@@ -10,6 +10,7 @@ import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing'
 import { shortAddress } from '../utils/format';
 import './CreateMarketModal.css';
 import { reportError } from '../services/report';
+import { pairAddress } from '../hooks/useMarketStream';
 
 const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const OTHER = 'other';
@@ -41,9 +42,11 @@ export const createPairProps = (baseMint, quoteMint) => (PRESET_QUOTES[quoteMint
 /**
  * Create a Manifest market for any token against SOL, USDC or any other token (by its mint).
  * Opened with both tokens chosen (e.g. "Create SKIRM/SOL"), it goes straight to the cost step.
- * `onCreated(address)` replaces opening the market (also when it turns out to exist already).
+ * mode="trade": the same two-token form opens the pair for market orders (through Jupiter),
+ * whether or not it has a Manifest market.
  */
-export default function CreateMarketModal({ initialBase = '', initialQuote = null, initialOther = '', onClose, onCreated = null }) {
+export default function CreateMarketModal({ initialBase = '', initialQuote = null, initialOther = '', mode = 'create', onClose }) {
+  const trading = mode === 'trade';
   const { publicKey, signAllTransactions } = useWallet();
   const { setVisible } = useWalletModal();
   const toast = useToast();
@@ -64,10 +67,9 @@ export default function CreateMarketModal({ initialBase = '', initialQuote = nul
   const sameToken = base?.data && quote && base.data.token.mint === quote.mint;
   const ready = !!base?.data && !!quote && !sameToken;
 
-  const go = (address) => {
-    onClose();
-    if (onCreated) onCreated(address); else navigate(`/trade/${address}`);
-  };
+  const go = (address) => { onClose(); navigate(`/trade/${address}`); };
+  // A pair without a Manifest market opens as "<base>-<quote>" (Jupiter only); one with a market opens it.
+  const trade = () => go(presetQuote?.market || pairAddress(base.data.token.mint, quote.mint));
 
   async function prepare() {
     if (!publicKey) { setVisible(true); return; }
@@ -88,7 +90,7 @@ export default function CreateMarketModal({ initialBase = '', initialQuote = nul
     setStage({ step: 'signing', prepared });
     try {
       const res = await signAndSubmit(prepared, signAllTransactions);
-      toast({ kind: 'success', title: `${base.data.token.symbol}/${quote.symbol} market created`, message: onCreated ? 'Now approve your limit order.' : 'Place the first order to start the book.', link: explorerTx(res.signature) });
+      toast({ kind: 'success', title: `${base.data.token.symbol}/${quote.symbol} market created`, message: 'Place the first order to start the book.', link: explorerTx(res.signature) });
       go(res.market);
     } catch (err) {
       if (!isUserRejection(err)) {
@@ -102,7 +104,7 @@ export default function CreateMarketModal({ initialBase = '', initialQuote = nul
   // Opened with both sides chosen: skip straight to the cost once the base token resolves.
   const [autoStarted, setAutoStarted] = useState(false);
   useEffect(() => {
-    if (autoStarted || !initialBase || !initialQuote || (initialQuote === OTHER && !initialOther) || !ready || !publicKey) return;
+    if (trading || autoStarted || !initialBase || !initialQuote || (initialQuote === OTHER && !initialOther) || !ready || !publicKey) return;
     setAutoStarted(true);
     if (presetQuote?.market) go(presetQuote.market); else prepare();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -113,14 +115,16 @@ export default function CreateMarketModal({ initialBase = '', initialQuote = nul
 
   return (
     <Modal
-      title={pair && stage.step !== 'form' ? `Create ${pair} market` : 'Create a market'}
+      title={trading ? 'Market buy or sell any pair' : pair && stage.step !== 'form' ? `Create ${pair} market` : 'Create a market'}
       onClose={() => !busy && onClose()}
       actions={(
         <>
           {stage.step === 'confirm' || stage.step === 'signing'
             ? <button type="button" className="btn" disabled={busy} onClick={() => setStage({ step: 'form' })}>Back</button>
             : <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>}
-          {stage.step === 'form' || stage.step === 'preparing' ? (
+          {trading ? (
+            <button type="button" className="btn primary" disabled={!ready} onClick={trade}>{pair ? `Trade ${pair}` : 'Trade'}</button>
+          ) : stage.step === 'form' || stage.step === 'preparing' ? (
             presetQuote?.market && quoteChoice !== OTHER
               ? <button type="button" className="btn primary" onClick={() => go(presetQuote.market)}>Open {pair} market</button>
               : <button type="button" className="btn primary" disabled={!ready || busy} onClick={prepare}>{stage.step === 'preparing' ? 'Preparing…' : publicKey ? 'Continue' : 'Connect wallet'}</button>
@@ -134,19 +138,18 @@ export default function CreateMarketModal({ initialBase = '', initialQuote = nul
         <p>
           Opens a new zero-fee {pair} order book on Manifest that anyone can trade. One-time cost of{' '}
           <strong>{stage.prepared.summary.costSol.toFixed(4)} SOL</strong> (network rent, not refundable).
-          {onCreated ? ' Your limit order is placed on it right after, with a second approval.' : null}
         </p>
       ) : (
         <div className="cm-form">
-          <label className="cm-label" htmlFor="cm-base">Token to trade (base)</label>
+          <label className="cm-label" htmlFor="cm-base">{trading ? 'Token to buy or sell' : 'Token to trade (base)'}</label>
           <input id="cm-base" className="cm-input" placeholder="Paste the token's mint address" value={baseInput} onChange={e => setBaseInput(e.target.value.trim())} autoFocus={!initialBase} />
           <TokenLine state={base} input={baseInput} />
 
-          <span className="cm-label">Priced in (quote)</span>
+          <span className="cm-label">{trading ? 'Paid in (any token)' : 'Priced in (quote)'}</span>
           <div className="cm-quotes">
             {(quotes.length ? quotes : [{ symbol: 'SOL' }, { symbol: 'USDC' }]).map(q => (
               <button key={q.symbol} type="button" className={`cm-chip ${quoteChoice === q.symbol ? 'active' : ''}`} onClick={() => setQuoteChoice(q.symbol)}>
-                {q.symbol}{q.market ? <span className="cm-exists"> · exists</span> : null}
+                {q.symbol}{q.market && !trading ? <span className="cm-exists"> · exists</span> : null}
               </button>
             ))}
             <button type="button" className={`cm-chip ${quoteChoice === OTHER ? 'active' : ''}`} onClick={() => setQuoteChoice(OTHER)}>Other token…</button>
@@ -158,7 +161,8 @@ export default function CreateMarketModal({ initialBase = '', initialQuote = nul
             </>
           )}
           {sameToken && <p className="cm-error">Pick two different tokens.</p>}
-          {presetQuote?.market && quoteChoice !== OTHER && <p className="cm-note">This market already exists, so there&apos;s nothing to create.</p>}
+          {!trading && presetQuote?.market && quoteChoice !== OTHER && <p className="cm-note">This market already exists, so there&apos;s nothing to create.</p>}
+          {trading && <p className="cm-note">Fills right away at the best price across every Solana DEX, through Jupiter.</p>}
           {error && <p className="cm-error">{error}</p>}
         </div>
       )}

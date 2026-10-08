@@ -45,3 +45,10 @@
 .of-expiry select { height: 26px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 4px; color: var(--text); font-size: 12px; padding: 0 6px; }
 @media (max-width: 760px) { .of-loading { height: 600px; } } /* the form's real height on phones, so nothing below jumps */
 .of-choices { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; line-height: 1.45; }
+
+/* Limit tab on a pair with no Manifest market: the form greyed out under a notice. */
+.of-limit-wrap { position: relative; }
+.of-limit { display: flex; flex-direction: column; gap: 10px; }
+.of-limit.blocked { opacity: 0.3; filter: grayscale(1); pointer-events: none; user-select: none; }
+.of-limit-overlay { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: center; padding-top: 48px; }
+.of-limit-overlay .no-market-notice { background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 10px; padding: 16px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); max-width: 260px; }

@@ -26,7 +26,7 @@ const VENUE_NAMES = { 'Manifest': 'Manifest', 'Archer': 'Archer' };
  * Archer, AMMs), routed by Jupiter. Buys are entered as an amount to spend, sells as an amount
  * to sell; the slippage limit caps the worst price.
  */
-export default function MarketOrder({ market, side, account, onPlaced, prefill = null }) {
+export default function MarketOrder({ market, side, account, onPlaced }) {
   const { publicKey, signAllTransactions } = useWallet();
   const { setVisible } = useWalletModal();
   const toast = useToast();
@@ -41,11 +41,6 @@ export default function MarketOrder({ market, side, account, onPlaced, prefill =
   const inToken = isBuy ? quoteToken : base, outToken = isBuy ? base : quoteToken;
 
   useEffect(() => setAmount(''), [market.address, side]);
-  // Sent here from a limit order that couldn't fill (prefill.amount is in the token spent).
-  useEffect(() => {
-    if (prefill?.amount) setAmount(toInputString(prefill.amount, inToken.decimals));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prefill]);
 
   // Only wallet balances count: a swap can't spend funds sitting in a Manifest market.
   const available = useMemo(() => {

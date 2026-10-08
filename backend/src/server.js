@@ -638,9 +638,7 @@ const handle = (fn) => async (req, res) => {
 
 const writeLimit = rateLimit('write', 30, 60_000);
 // takeViaJupiter: fill what Jupiter can beat the limit by first, rest the remainder here.
-// A pair with no Manifest market: the limit fills through Jupiter in full, or not at all.
-app.post('/api/orders/prepare', writeLimit, handle(body => (!markets.summary(body.market) && isPairId(body.market) ? orders.prepareJupiterLimit(body)
-    : body.takeViaJupiter && !body.postOnly ? orders.prepareSmartLimit(body) : orders.prepareOrder(body))));
+app.post('/api/orders/prepare', writeLimit, handle(body => (body.takeViaJupiter && !body.postOnly ? orders.prepareSmartLimit(body) : orders.prepareOrder(body))));
 app.post('/api/orders/cancel', writeLimit, handle(body => orders.prepareCancel(body)));
 app.post('/api/orders/edit', writeLimit, handle(body => orders.prepareEdit(body)));
 app.post('/api/orders/cancel-all', writeLimit, handle(body => orders.prepareCancelAll(body)));
@@ -721,6 +719,8 @@ app.get('/api/tokens/:mint', rateLimit('tokens', 30, 60_000), async (req, res) =
     res.set('Cache-Control', 'no-cache');
     res.json({
         token: registry.display(mint),
+        // Manifest markets with this token on either side, against anything (empty ones too).
+        marketCount: markets.allSummaries().filter(s => s.baseMint === mint || s.quoteMint === mint).length,
         quotes: NEW_MARKET_QUOTES.filter(q => q.mint !== mint).map(q => ({
             ...q,
             market: markets.marketsForPair(mint, q.mint).find(s => s.baseMint === mint)?.address || null,

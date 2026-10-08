@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 import Modal from './Modal.jsx';
 import MarketOrder from './MarketOrder.jsx';
-import CreateMarketModal, { createPairProps } from './CreateMarketModal.jsx';
+import { NoMarketNotice } from './NoMarketPanel.jsx';
 import { useToast } from './Toasts.jsx';
 import { getJSON, postJSON } from '../services/api';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
@@ -44,17 +44,11 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
   const [setupPrompt, setSetupPrompt] = useState(null);
   const [riskPrompt, setRiskPrompt] = useState(null);
   const [reference, setReference] = useState(null); // { price, address }
-  const [unfillable, setUnfillable] = useState(null); // a no-market limit Jupiter can't fill in full
-  const [creating, setCreating] = useState(null);     // the order to place once its market exists
-  const [marketPrefill, setMarketPrefill] = useState(null);
-  const [autoPlace, setAutoPlace] = useState(null);
   const seededFor = useRef(null);
   const priceTouched = useRef(false);
-  const location = useLocation();
-  const navigate = useNavigate();
 
   const base = market?.base, quote = market?.quote;
-  // A pair with no Manifest market: no book to rest on, so limits fill through Jupiter in full or not at all.
+  // A pair with no Manifest market: market orders only (Limit is greyed out under a notice).
   const noMarket = !!market?.noMarket;
   const pDecimals = priceDecimals(market?.last ?? book?.bestBid);
 
@@ -62,7 +56,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
     priceTouched.current = false;
     setAmount('');
     setPrice(''); // re-seeded below from the new market's book, if it has one
-    if (market?.noMarket) setOrderType('market'); // what a pair without a book is mostly for
+    if (market?.noMarket) setOrderType('market');
   }, [market?.address]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Default to the best price on your own side of the book (a resting order), once per market
@@ -70,15 +64,15 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
   // Waits for the book: before it arrives the only other hint is the last trade, which on a thin
   // market can be far off. Jupiter's market price is the fallback for an empty side.
   useEffect(() => {
-    if (!market || !(book || market.noMarket) || priceTouched.current) return;
+    if (!market || !book || priceTouched.current) return;
     const key = `${market.address}|${side}`;
     if (seededFor.current === key) return;
-    const ref = (side === 'buy' ? book?.bestBid : book?.bestAsk) ?? referenceFor(market.address) ?? market.last;
+    const ref = (side === 'buy' ? book.bestBid : book.bestAsk) ?? referenceFor(market.address) ?? market.last;
     if (!ref) return;
     seededFor.current = key;
     setPrice(toInputString(ref, pDecimals + 2));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [market, book, side, pDecimals, reference]);
+  }, [market, book, side, pDecimals]);
 
   const editPrice = (v) => {
     priceTouched.current = true;
@@ -106,28 +100,6 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
     const t = setInterval(load, REFERENCE_REFRESH_MS);
     return () => { live = false; clearInterval(t); };
   }, [market?.address]);
-
-  // Arrived from "Create market & place limit order": fill the form in and place it, once the
-  // market price is known (it decides whether Jupiter fills part of it first).
-  useEffect(() => {
-    const po = location.state?.placeOrder;
-    if (!po || !market || market.address !== po.market || reference?.address !== market.address) return;
-    navigate(location.pathname, { replace: true, state: null }); // a reload mustn't place it again
-    priceTouched.current = true;
-    setOrderType('limit');
-    setSide(po.side);
-    setPrice(po.price);
-    setAmount(po.amount);
-    setExpiry(po.expiry || '');
-    setAutoPlace(po);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.state, market, reference]);
-  useEffect(() => {
-    if (!autoPlace || side !== autoPlace.side || price !== autoPlace.price || amount !== autoPlace.amount) return;
-    setAutoPlace(null);
-    submit();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoPlace, side, price, amount]);
 
   const referenceFor = (address) => (reference && reference.address === address ? reference.price : null);
   const p = Number(price), a = Number(amount);
@@ -211,10 +183,6 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
     try {
       let prepared = await prepareChecked();
       if (!prepared) return;
-      if (prepared.step === 'unfillable') {
-        setUnfillable({ ...prepared, side, price, amount, expiry, total });
-        return;
-      }
       if (prepared.step === 'setup') {
         setBusy(null);
         const ok = await new Promise(resolve => setSetupPrompt({ resolve, summary: prepared.summary }));
@@ -232,16 +200,7 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
       }
       setBusy('Approve in your wallet…');
       const res = await signAndSubmit(prepared, signAllTransactions);
-      if (noMarket) {
-        // Filled in full through Jupiter.
-        const filledBase = side === 'buy' ? res.outAmount : res.inAmount;
-        toast({
-          kind: 'success',
-          title: `${side === 'buy' ? 'Bought' : 'Sold'} ${formatAmount(filledBase)} ${base.symbol}`,
-          message: `Average ${formatPrice(res.allInPrice ?? res.price)} ${quote.symbol} including fees (your limit was ${price}), via Jupiter. ${side === 'buy' ? `${formatAmount(res.outAmount)} ${base.symbol}` : `${formatAmount(res.outAmount)} ${quote.symbol}`} is in your wallet.`,
-          link: explorerTx(res.signature),
-        });
-      } else if (res.swap) {
+      if (res.swap) {
         const got = side === 'buy' ? `${formatAmount(res.swap.outAmount)} ${base.symbol}` : `${formatAmount(res.swap.outAmount)} ${quote.symbol}`;
         const filledBase = side === 'buy' ? res.swap.outAmount : res.swap.inAmount;
         toast({
@@ -295,7 +254,9 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
         )}
       </div>
 
-      {orderType === 'market' ? <MarketOrder market={market} side={side} account={account} onPlaced={onPlaced} prefill={marketPrefill} /> : (<>
+      {orderType === 'market' ? <MarketOrder market={market} side={side} account={account} onPlaced={onPlaced} /> : (
+      <div className="of-limit-wrap">
+      <div className={`of-limit ${noMarket ? 'blocked' : ''}`} inert={noMarket}>
       <div className="of-avail">
         <span className="muted">Available</span>
         <span className="num">{available == null ? '—' : `${formatAmount(available)} ${side === 'buy' ? quote.symbol : base.symbol}`}</span>
@@ -309,12 +270,12 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
         ))}
       </div>
       <Field label="Total" unit={quote.symbol} value={total ? toInputString(total, quote.decimals) : ''} onChange={setTotal} />
-      {!noMarket && <label className="of-expiry">
+      <label className="of-expiry">
         <span className="muted" title="An expired order stops trading; you then withdraw its funds with one tap">Expires</span>
         <select value={expiry} onChange={e => setExpiry(e.target.value)}>
           {EXPIRIES.map(([label, secs]) => <option key={label} value={secs}>{label}</option>)}
         </select>
-      </label>}
+      </label>
 
       {risky && (
         <div className="of-note danger" role="alert">
@@ -336,13 +297,6 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
         <div className="of-note warn">Post-only: this price crosses the book and would be rejected.</div>
       )}
 
-      {noMarket && (
-        <div className="of-note">
-          No {market.symbol} order book yet: this fills right away through Jupiter only if all of it can fill at
-          your price or better. Otherwise you can create the market and let it wait there.
-        </div>
-      )}
-
       <TokenRiskNote warnings={riskWarnings} />
 
       <button
@@ -356,21 +310,14 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
 
       <dl className="of-summary">
         <div><dt>{side === 'buy' ? 'You pay' : 'You sell'}</dt><dd className="num">{side === 'buy' ? `${formatAmount(total)} ${quote.symbol}` : `${formatAmount(a || 0)} ${base.symbol}`}</dd></div>
-        <div><dt>{noMarket ? 'You receive at least' : 'You receive when filled'}</dt><dd className="num">{side === 'buy' ? `${formatAmount(a || 0)} ${base.symbol}` : `${formatAmount(total)} ${quote.symbol}`}</dd></div>
+        <div><dt>You receive when filled</dt><dd className="num">{side === 'buy' ? `${formatAmount(a || 0)} ${base.symbol}` : `${formatAmount(total)} ${quote.symbol}`}</dd></div>
         <div><dt>Market price</dt><dd className="num" title="Jupiter's price across all Solana venues">{refPrice ? `${formatPrice(refPrice)} ${quote.symbol}` : '—'}</dd></div>
-        {noMarket ? (
-          <>
-            <div><dt>Route</dt><dd>Best across every Solana DEX <span className="muted">via Jupiter</span></dd></div>
-            <div><dt>Payout</dt><dd>Straight to your wallet</dd></div>
-          </>
-        ) : (
-          <>
-            <div><dt>Trading fee</dt><dd>0% <span className="muted">(Manifest)</span></dd></div>
-            <div><dt>Payout</dt><dd>Automatic, straight to your wallet</dd></div>
-          </>
-        )}
+        <div><dt>Trading fee</dt><dd>0% <span className="muted">(Manifest)</span></dd></div>
+        <div><dt>Payout</dt><dd>Automatic, straight to your wallet</dd></div>
       </dl>
-      </>)}
+      </div>
+      {noMarket && <div className="of-limit-overlay"><NoMarketNotice market={market} /></div>}
+      </div>)}
       <p className="legal-links">
         <span>By trading you agree to the</span>
         <Link to="/terms">Terms</Link>
@@ -402,66 +349,6 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
             This can&rsquo;t be undone once filled.
           </p>
         </Modal>
-      )}
-      {unfillable && (
-        <Modal
-          title={`Jupiter can't fill all of this at ${unfillable.price}`}
-          onClose={() => setUnfillable(null)}
-          actions={(
-            <>
-              <button type="button" className="btn" onClick={() => setUnfillable(null)}>Change price</button>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => {
-                  setOrderType('market');
-                  setMarketPrefill({ amount: unfillable.side === 'buy' ? unfillable.total : Number(unfillable.amount), at: Date.now() });
-                  setUnfillable(null);
-                }}
-              >
-                Use a market order
-              </button>
-              <button
-                type="button"
-                className="btn primary"
-                onClick={() => {
-                  const { side: s, price: pr, amount: am, expiry: ex } = unfillable;
-                  setCreating({ side: s, price: pr, amount: am, expiry: ex });
-                  setUnfillable(null);
-                }}
-              >
-                Create market &amp; place order
-              </button>
-            </>
-          )}
-        >
-          <p>
-            {unfillable.fillable > 0
-              ? <>At {unfillable.price} {quote.symbol} or better, Jupiter can fill only <strong>{formatAmount(unfillable.fillable)}</strong> of your{' '}
-                {formatAmount(unfillable.size)} {base.symbol} right now.</>
-              : <>Jupiter can&rsquo;t fill all {formatAmount(unfillable.size)} {base.symbol} at {unfillable.price} {quote.symbol} or better right now.</>}
-            {unfillable.reference ? <> The market price is {formatPrice(unfillable.reference)} {quote.symbol}.</> : null}
-            {' '}There&rsquo;s no {market.symbol} order book yet for the rest to wait on, so nothing was placed.
-          </p>
-          <ul className="of-choices">
-            <li>
-              <strong>Create market &amp; place order:</strong> opens a zero-fee {market.symbol} order book (one-time network rent) and
-              places your limit {unfillable.side} there. Whatever Jupiter can fill at your price or better fills right away; the rest waits on the book until someone trades at your price.
-            </li>
-            <li>
-              <strong>Use a market order:</strong> {unfillable.side === 'buy' ? 'buys' : 'sells'} now at the best price available, which
-              {unfillable.side === 'buy' ? ' is higher' : ' is lower'} than your limit. You&rsquo;ll see the price before approving.
-            </li>
-            <li><strong>Change price:</strong> {unfillable.side === 'buy' ? 'raise' : 'lower'} your limit so Jupiter can fill all of it.</li>
-          </ul>
-        </Modal>
-      )}
-      {creating && (
-        <CreateMarketModal
-          {...createPairProps(base.mint, quote.mint)}
-          onClose={() => setCreating(null)}
-          onCreated={(address) => navigate(`/trade/${address}`, { state: { placeOrder: { ...creating, market: address } } })}
-        />
       )}
       {setupPrompt && (
         <Modal

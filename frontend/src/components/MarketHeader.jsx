@@ -84,7 +84,7 @@ function MarketSelector({ market }) {
   const [quoteFilter, setQuoteFilterState] = useState(readQuoteFilter);
   const [token, setToken] = useState(null);       // pasted mint: { token, quotes: [{ symbol, mint, market }] }
   const [found, setFound] = useState([]);         // tokens matching a typed name/symbol
-  const [create, setCreate] = useState(null);     // { base, quote } for the create-market dialog
+  const [create, setCreate] = useState(null);     // { base, quote, other, mode } for the create-market / trade dialog
   const navigate = useNavigate();
   const ref = useRef(null);
 
@@ -144,7 +144,9 @@ function MarketSelector({ market }) {
   }, [open]);
 
   const go = (address) => { setOpen(false); setQuery(''); navigate(`/trade/${address}`); };
-  const startCreate = (base = '', quote = null) => { setOpen(false); setCreate({ base, quote }); };
+  const startCreate = (base = '', quote = null) => { setOpen(false); setCreate({ base, quote, mode: 'create' }); };
+  // "Market buy or sell any pair": the same two-token form, opening the pair for market orders.
+  const startTrade = (base = '') => { setOpen(false); setCreate({ base, quote: 'other', mode: 'trade' }); };
 
   // Starred markets first (those matching the search and filter), each group sorted.
   const q = query.trim().toLowerCase();
@@ -156,7 +158,11 @@ function MarketSelector({ market }) {
     ...(sortMarkets(favMatches, sort) || []),
     ...(sortMarkets(list.filter(m => !isFavorite(m.address)), sort) || []),
   ];
-  const creatable = token?.quotes.filter(x => !x.market && !list?.some(m => m.base.mint === token.token.mint && m.quote.mint === x.mint)) || [];
+  // A pasted token with no Manifest market at all (against anything): offer market orders and creating one.
+  // One with any market just lists its markets; "+ Create market" still makes new pairs.
+  const noMarketToken = token && token.marketCount === 0 && !list?.some(m => m.base.mint === token.token.mint || m.quote.mint === token.token.mint)
+    ? token : null;
+  const pastedMint = MINT_RE.test(query.trim()) ? query.trim() : '';
   // Verified tokens whose name matched and that have no market at all, with or without orders.
   // (A token with only empty markets shows those markets in the list instead.)
   const noMarket = found.filter(t => (t.markets ?? t.activeMarkets) === 0 && !list?.some(m => m.base.mint === t.mint || m.quote.mint === t.mint));
@@ -196,7 +202,7 @@ function MarketSelector({ market }) {
           </div>
           <div className="selector-list">
             {!list && <div className="selector-empty"><span className="spinner" /></div>}
-            {list && !sorted.length && !creatable.length && !noMarket.length && <div className="selector-empty">No markets match.</div>}
+            {list && !sorted.length && !noMarketToken && !noMarket.length && <div className="selector-empty">No markets match.</div>}
             {sorted?.map(m => (
               <div
                 role="button"
@@ -217,29 +223,32 @@ function MarketSelector({ market }) {
                 <span className="num muted">{m.volume24hUsd != null ? formatUsd(m.volume24hUsd) : '—'}</span>
               </div>
             ))}
-            {creatable.length > 0 && (
+            {noMarketToken && (
               <div className="selector-create">
                 <div className="selector-create-title">
-                  <TokenIcon token={token.token} size={18} />
-                  <span>No {token.token.symbol}/{creatable.map(x => x.symbol).join(', ')} market yet</span>
+                  <TokenIcon token={noMarketToken.token} size={18} />
+                  <span>No {noMarketToken.token.symbol} market for limit orders.</span>
                 </div>
-                <div className="selector-create-sub muted">Trade now at the best price across every Solana DEX, via Jupiter:</div>
+                <div className="selector-create-sub muted">Place market order:</div>
                 <div className="selector-create-actions">
-                  {creatable.map(x => (
-                    <button key={x.mint} type="button" className="btn small primary" onClick={() => go(pairAddress(token.token.mint, x.mint))}>
-                      Trade {token.token.symbol}/{x.symbol}
+                  {noMarketToken.quotes.map(x => (
+                    <button key={x.mint} type="button" className="btn small primary" onClick={() => go(pairAddress(noMarketToken.token.mint, x.mint))}>
+                      Market trade {noMarketToken.token.symbol}/{x.symbol}
                     </button>
                   ))}
+                  <button type="button" className="btn small primary" onClick={() => startTrade(noMarketToken.token.mint)}>
+                    Market trade {noMarketToken.token.symbol}/other token…
+                  </button>
                 </div>
-                <div className="selector-create-sub muted">Or create its order book (for limit orders that wait for their price):</div>
+                <div className="selector-create-sub muted">Create market for limit orders:</div>
                 <div className="selector-create-actions">
-                  {creatable.map(x => (
-                    <button key={x.mint} type="button" className="btn small" onClick={() => startCreate(token.token.mint, x.symbol)}>
-                      Create {token.token.symbol}/{x.symbol}
+                  {noMarketToken.quotes.map(x => (
+                    <button key={x.mint} type="button" className="btn small" onClick={() => startCreate(noMarketToken.token.mint, x.symbol)}>
+                      Create {noMarketToken.token.symbol}/{x.symbol}
                     </button>
                   ))}
-                  <button type="button" className="btn small" onClick={() => startCreate(token.token.mint, 'other')}>
-                    {token.token.symbol}/other token…
+                  <button type="button" className="btn small" onClick={() => startCreate(noMarketToken.token.mint, 'other')}>
+                    {noMarketToken.token.symbol}/other token…
                   </button>
                 </div>
               </div>
@@ -251,7 +260,7 @@ function MarketSelector({ market }) {
                   <div key={t.mint} className="selector-nomarket">
                     <TokenIcon token={t} size={18} />
                     <span className="selector-nomarket-name"><strong>{t.symbol}</strong> <span className="muted">{t.name}</span></span>
-                    <button type="button" className="btn small primary" title={`Trade ${t.symbol}/SOL via Jupiter`} onClick={() => go(pairAddress(t.mint, SOL_MINT))}>Trade</button>
+                    <button type="button" className="btn small primary" title={`Trade ${t.symbol}/SOL via Jupiter`} onClick={() => go(pairAddress(t.mint, SOL_MINT))}>Market trade</button>
                     <button type="button" className="btn small" onClick={() => startCreate(t.mint)}>Create market</button>
                   </div>
                 ))}
@@ -262,10 +271,15 @@ function MarketSelector({ market }) {
                 ＋ Create market
               </button>
             )}
+            {list && (
+              <button type="button" className="selector-create-any" onClick={() => startTrade(pastedMint)}>
+                Market buy or sell any pair
+              </button>
+            )}
           </div>
         </div>
       )}
-      {create && <CreateMarketModal initialBase={create.base} initialQuote={create.quote} onClose={() => setCreate(null)} />}
+      {create && <CreateMarketModal initialBase={create.base} initialQuote={create.quote} mode={create.mode} onClose={() => setCreate(null)} />}
     </div>
   );
 }
