@@ -1,8 +1,8 @@
 module.exports = {
   apps: [{
-    name: 'spot-aggregator',
+    name: 'spot-terminal',
     script: 'backend/src/server.js',
-    cwd: '/home/phil/workspace/spot-aggregator',
+    cwd: '/home/phil/workspace/spot-terminal',
     interpreter: '/home/phil/.nvm/versions/node/v20.20.2/bin/node',
     // nginx proxies spotterminal.com to 127.0.0.1:3000.
     // Payouts are paid by LiqFlow LLC's hot wallet (56Pk…, shared with Skirmish). It only ever

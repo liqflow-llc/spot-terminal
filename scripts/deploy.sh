@@ -8,5 +8,5 @@ export PATH=/home/phil/.nvm/versions/node/v20.20.2/bin:$PATH
 (cd frontend && npm install --silent && npx vite build)
 pm2 startOrReload ecosystem.config.js --update-env
 pm2 save
-echo "✅ spot-aggregator deployed"
-pm2 list | grep spot-aggregator
+echo "✅ spot-terminal deployed"
+pm2 list | grep spot-terminal

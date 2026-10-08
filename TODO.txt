@@ -1,0 +1,263 @@
+Respond to each TODO here after each point, not in the chat.
+
+1. Make these columns sortable "Pair
+Last
+24h vol"
+
+   >> DONE. In the market picker, click "Pair", "Last" or "24h vol" to sort by it.
+      The first click sorts Pair A→Z, or Last/24h vol highest first; a second click flips
+      the order (▲/▼ shows which). Markets with no price or volume always stay at the bottom.
+      It sorts the list you're looking at (the top 150 markets, or your search results).
+      Note: "Last" compares raw prices, and pairs are quoted in different coins (SOL, USDC...),
+      so that sort is most useful after searching, e.g. "USDC".
+
+2. What was the other protocal like Manifest you mentioned? Would there be any benefit in implementing that protocal as well. Manifest is already 0 fees so im not sure, but maybe if you're trying to trade a market that wasnt created in Manifest you would want to use the other protocal.
+
+   >> It was ARCHER. Jupiter routes to four on-chain order books: Manifest, Archer,
+      Phoenix and OpenBook. Phoenix spot and OpenBook are basically dead, so the only
+      other live one is Archer. As measured on Oct 4:
+        - Manifest: ~3,800 markets, ~31k tx/hour, zero fees, anyone can create a market.
+        - Archer:   82 markets, ~40k tx/hour, quotes from professional market makers,
+                    fees per market. Jupiter only routes to a user's orders on Archer if
+                    their book is whitelisted in Archer's registry (arranged by Telegram DM),
+                    and its API needs a key.
+      For your case (a token with no Manifest market) Archer won't help: it has 82 markets
+      against Manifest's ~3,800. The fix for that is to create the market on Manifest,
+      which is now built (see #3).
+      Where Archer WOULD help: as liquidity to trade AGAINST. On the big pairs (SOL/USDC
+      etc.) its market makers add depth, so a future "market order" button could fill
+      against Manifest + Archer together through Jupiter (restricted to those two venues,
+      no AMMs), and the order book could show Archer's depth merged in. Recommendation:
+      keep resting orders on Manifest only. Add Archer later, read-only plus market orders,
+      once we build market orders.
+
+3. I dont see anyway to create a new market. Like if i wanted to buy my token skirm9MsH4dntj9T4QCRJpXgSkz2AP9WERipnCbxD7e theres no way i can trade it from our interface.
+
+   >> DONE. Open the market picker and paste the token's mint address. If it has no market
+      yet you get "Create SKIRM/SOL" and "Create SKIRM/USDC" buttons. Click one: a dialog
+      shows the exact one-time cost (0.0053 SOL for SKIRM/SOL on mainnet: network rent for the market and its
+      two vaults; not refundable, Manifest markets can't be closed), then one wallet approval,
+      and you land on the new market. Any standard or Token-2022 token works; SKIRM is a
+      standard SPL token, so it's fine. If the market already exists, you're taken to it
+      instead of creating a duplicate.
+      Important: a new market starts EMPTY. To BUY SKIRM there, someone has to post SELL
+      orders first. You could seed it yourself, e.g. post some asks from the business hot
+      wallet (56Pk). That book is separate from the locked Meteora LP, so it adds a second
+      place to trade SKIRM. Empty markets don't appear in the default list (it only shows
+      markets with orders), but searching the mint always finds them.
+
+   Also fixed while testing these:
+   - Switching markets from the picker left the chart on the old market (also on the live
+     site), because the chart's first load could hang for up to a minute waiting on
+     GeckoTerminal's rate limit. Charts now load within ~3s and always follow the selected
+     market.
+   - The price box kept the previous market's price after switching markets.
+   - Keeper race: right after a user cancelled an order, the keeper could mistake another
+     order's partial proceeds in the same market for the cancelled order's fill. The claim
+     attempt failed harmlessly, but it flipped the order's status from "cancelled" back to
+     "open", which also blocked refunding the setup deposit. No real orders were affected
+     (production has none yet).
+     
+4. Add the ability to favorite (star) markets so they appear on top.
+
+   >> DONE. Click the ☆ next to any market in the picker, or next to the pair name at the top of
+      the page. Starred markets always list first in the picker (and first among search results),
+      sorted by whichever column you picked, even if they aren't in the top 150. Stars are saved
+      in your browser (no account needed), so they're per browser/device.
+
+5. Do you think it would be a good idea to put the limit orders from Archer and JUP V1 in our orderbook with an icon indicating theyre either from JUP or Archer. I know Manifest orders wont be able to fill them, but people using JUP AMM will be able to. Like if I saw a large order on SOL/USDC from Archer i might want to place my order slightly above it on Manifest so my order gets filled before thiers. Maybe would could have dynamic routing for market orders, say theres 2 sell orders on 1 SOL $121 on Manifest and 1 SOL $122 on Archer. I place a markey buy for 3 SOL at $123. It fills both orders on manifest and archer and then places a 1 SOL order on Manifest for $123. 
+
+   >> Short answer: Archer depth yes (later), JUP V1 orders no, and the routing idea is good but it
+      becomes a much smaller job once we have Archer's book.
+
+      JUP V1: don't show them. They are not resting liquidity anyone can trade against. A V1 order
+      is a trigger: when the market reaches its price, Jupiter's keeper sells/buys it by SWAPPING
+      through Jupiter (which includes Manifest). So nobody can "fill" a V1 order the way you fill
+      a Manifest order. Showing them as book levels would mislead people. Also V1 is deprecated
+      and its book is mostly stale orders from 2024–25 (we measured ~78 tx/hour). The one useful
+      insight in your idea does hold, though: a V1 sell triggering at $121 would sell into the best
+      bids at that moment, which can be YOUR Manifest bid. That's a nice-to-have "pending
+      triggers" indicator, not book depth. Low priority.
+
+      Archer: yes, showing its depth (with an "A" badge) is useful for exactly your reason: seeing
+      where the real market makers sit so you can price just ahead of them on Manifest. Two
+      caveats from research:
+        - Archer settles trades in discrete batch auctions, not continuously, so its quotes are
+          more "indicative" than Manifest's.
+        - We still need a way to read its book. Earlier research found its API needs a key; the
+          next step is checking whether its on-chain accounts can be decoded directly (no key).
+      Your routing example (buy 3 SOL at $123: take $121 on Manifest + $122 on Archer, rest 1 SOL
+      at $123 on Manifest) is a good design, and the Manifest half is already what our limit
+      orders do. A limit buy at $123 takes every Manifest ask ≤ $123 at THEIR prices, then rests
+      the remainder. Adding Archer means: before placing, take the Archer asks ≤ your limit via
+      Jupiter's swap API restricted to Archer, then place the rest as a normal order. One wallet
+      approval can cover both. I'd build it in this order: (1) read Archer's book + show it,
+      (2) "take from Archer first" inside the limit-order flow. It isn't built yet: it needs the
+      Archer data access sorted out first. Want me to start on (1)?
+
+6. Create a strong warning when limit orders are places beyond 5% of market price (im not sure how we'll get this) the JUP market price or another reliable way, Manifest books usually arent liquid enough to be accurate. We have no market orders and that's a good thing becuase the books are so illiquid, but people can still technically market order but they need to put in the limit price. 
+
+   >> DONE. The "market price" is Jupiter's price (its price API aggregates every Solana venue,
+      AMMs included, so it's reliable even when the Manifest book is thin or empty): base token
+      USD price ÷ quote token USD price, refreshed every 30s. It's also shown in the order summary.
+      - Buying >5% ABOVE, or selling >5% BELOW, the market price: a red warning under the price
+        box shows how far off it is and roughly how much extra it would cost. Pressing Buy/Sell
+        then opens a red "Price far from market" dialog. "Change price" is the highlighted
+        button; "Place anyway" goes ahead.
+      - The backend enforces it too: such orders are refused unless the dialog was confirmed, so
+        a stale page or a direct API call can't skip it.
+      - The harmless direction (buying far BELOW market) only gets a mild note past 20%: "may take
+        a long time to fill".
+      - Tokens Jupiter has no price for (e.g. brand-new ones): a mild note to double-check the
+        price, since there's nothing reliable to compare against.
+      Why 5% matters even though the book "fills at better prices": a bid above the market is
+      instantly sold into by arbitrageurs AT YOUR PRICE, so the damage is real.
+
+7. Think of a good name and domain for this app. juporderbook was for the old app, i need buy a new domain. This app will be under LiqFlow LLC so add similiar Terms and Privacy policy that LiqFlow and w2w-chat have. 
+
+   >> NAME: I recommend LiqBook (liqbook.com). It's part of the LiqFlow family (LiqFlow LLC
+      owns both), says "liquidity + order book" in one word, and is short. As of Oct 5 the .com
+      was UNREGISTERED (checked with the Verisign registry), and I found no crypto product using
+      the name. BUY IT SOON. Runners-up whose .com was also free: spotclob.com, solclob.com.
+      (fillbook, limitbook, tickbook, bookflow, makerbook .com are taken.)
+      I did NOT put "LiqBook" on the live site yet, so nobody sees it and grabs the domain first.
+      After you buy it, tell me and I'll switch it over. It's one constant
+      (frontend/src/brand.js) plus the page title and the analytics domain, then nginx/Cloudflare
+      for the new domain.
+
+      TERMS & PRIVACY: DONE, live at /terms and /privacy, linked under the order form and on the
+      Account page. Modelled on LiqFlow's documents (same structure, Florida law, "I"
+      voice, US$100 liability cap) but rewritten for what this app does: non-custodial, you
+      sign everything, best-effort automatic payouts, the refundable setup deposit,
+      non-refundable market creation rent, tokens not vetted, price warnings are a convenience,
+      no sanctioned users. The Privacy Policy lists exactly what the app collects and stores (I
+      checked the live site: no cookies; Plausible + Cloudflare Web Analytics, Google Fonts and
+      token-icon hosts see your IP; nginx keeps logs 14 days; the IP rate-limit counters now
+      expire within a minute or two).
+      Operator: like LiqFlow's pages, it says "Phil, an individual based in Florida" for now,
+      because Sunbiz still shows LiqFlow LLC as pending approval. Once it's Active, change the
+      two lines in frontend/src/legal/legalMeta.js (the comment there has the exact text), same
+      as on LiqFlow. Contact is support@liqflow.app.
+      Not legal advice and not lawyer-reviewed, same as LiqFlow's.
+
+   ---------------------------------------------------------------------------------------------
+   !! INCIDENT FOUND WHILE TESTING (Oct 5): THE SITE HAS SHOWN NO DATA SINCE ~08:20 THIS MORNING.
+      Helius answers every request with "429 Too Many Requests: max usage reached": this app's
+      Helius key ran out of credits (no other app uses that key; liq-heatmap, w2w, skirmish etc.
+      have their own). The cause was mine: the app STREAMED data over websockets, which Helius
+      bills at 20 credits per MB:
+        - every Manifest transaction's logs, to catch trades: ~92,000 tx/hour, ~0.9 GB/hour,
+          about 416,000 credits/DAY (more than a month of the free plan every 3 days);
+        - the full market account of every viewed market (SOL/USDC's is ~1 MB and changes
+          several times a second).
+      FIXED and deployed: nothing is streamed any more.
+        - Markets: every minute, only the markets that changed since the last scan (~2 credits).
+        - Order books you're looking at: one batched call every 3s for all viewed markets.
+          Markets with open orders but no viewer: every 15s, for payouts.
+        - Trades are now inferred by comparing book snapshots (orders that shrank + the on-chain
+          volume counter), tested to give the exact price/size of a fill.
+        - Wallet balances: 1 call instead of 3, every 10s, and nothing polls while the tab is in
+          the background.
+      New cost: ~3,000 credits/day for the scans, plus ~1,200 per hour while anyone has a market
+      open (one batched call covers every viewer), ~240 per hour while any order awaits payout,
+      and ~360 per hour per connected wallet with the tab visible. Even if the site were open
+      24/7 that's roughly 40,000/day (~1.2M/month); at today's traffic it's far less. Before it
+      was 416,000+/day.
+      The site recovers BY ITSELF as soon as Helius accepts calls again: no redeploy needed.
+      WHAT YOU NEED TO DO: check the Helius dashboard for this key's plan and reset date. Either
+      wait for the monthly reset, or buy credits / upgrade for this month. (I didn't want to
+      switch the site onto another app's key or the public Solana RPC without asking.)
+      
+8. Update the OG images and anything SSO, so when i post the link somewhere it doesnt show the old juporderbook app and descirption.
+
+   >> DONE. Every page now carries its own title, description and preview tags (Open Graph +
+      Twitter card), filled in by the server because preview bots don't run JavaScript. Market
+      links show the pair and price, e.g. "SOL/USDC 120.22 USDC · SpotBook" with "...: 120.22
+      USDC, -0.81% 24h". New 1200x630 preview image: /og.png (also served at the old
+      /og-image.png address that cached previews point to). To regenerate it after the rename:
+      node backend/scripts/make-og-image.mjs (reads the name from frontend/src/brand.js).
+      Platforms cache previews, so to see the new one right away re-scrape the link:
+        X: post it again (X refreshes within a few days) / LinkedIn: linkedin.com/post-inspector
+        Facebook: developers.facebook.com/tools/debug / Telegram: send the link to @WebpageBot
+        Discord: add "?v=2" to the link once (its cache is per exact URL).
+
+9. When we search for a token address that doesnt have a market we get these 2 options, which are good but we should have another option to create a market with any other base paid like SKIRM/USDT. The SOL and USDC options are good but should have a 3rd option for abitrary token as the base. Also at the end of the token list there should be an option to "Create market"  
+```
+No SKIRM/SOL or USDC market yet
+Create SKIRM/SOL
+Create SKIRM/USDC
+```
+
+   >> DONE. Pasting a mint now offers "Create SKIRM/SOL", "Create SKIRM/USDC" and
+      "SKIRM/other token…". The list also always ends with a "＋ Create market" button. Both
+      open one dialog: paste the base token, pick SOL / USDC or "Other token…" and paste any
+      quote token's mint (e.g. USDT's address for SKIRM/USDT). It shows each token's name, a ✓ if it's on
+      Jupiter's verified list (or "unverified" so people double-check), and says if the market
+      already exists (then it just opens it). Then the exact cost, one approval, done.
+
+10. Can we have option to filter the list by SOL pairs and USDC pairs.
+
+   >> DONE. Chips under the search box: All / SOL pairs / USDC pairs. The choice is remembered
+      in your browser and applies to search results and starred markets too. Right now that's
+      379 SOL pairs and 1,804 USDC pairs with orders.
+
+11. When i click on an order in the orderbook it should populate the Price box. 
+
+   >> It already did on the Limit tab (I tested it on the live site). The likely reason it
+      seemed broken: on the new Market tab there's no price box, so the click did nothing
+      visible. Now clicking a book row while on Market switches to Limit and fills the price.
+      Found a real bug while testing this: on page load the price box could be pre-filled
+      with nonsense (SOL/USDC showed 0.000112). Cause: my new trade detection recorded a
+      cancelled dust order as a "trade" at 0.000112, which became the "last price". Fixed the
+      detection (an order behind a better-priced resting order can't have been filled, and
+      trades >50% away from the market are ignored), removed the bad candles (196 across all
+      markets), and the price box now waits for the order book instead of using the last trade.
+
+12. In the Market, Buy section it says Spend but in the Market, Sell box it says Amount. Let's make them both Amount. 
+
+   >> DONE. Both say "Amount" (the unit next to it still shows which token: USDC when buying,
+      SOL when selling).
+
+13. For the slippage options have 0.5% 1% and then customer percent. 
+
+   >> DONE. 0.5% / 1% / Custom (type any value up to 10%; anything else is flagged and blocks
+      the order).
+
+14. In this section we should also include the token address 
+```
+1.00000
+≈ $1.00
+24h change
++0.00%
+24h high
+1.0001
+24h low
+0.99990
+24h volume (USDG)
+2.01M
+Venue
+Manifest
+```
+
+   >> DONE. The header now has "<TOKEN> address  So11…1112 ⧉": the short address links to the
+      token on Solscan, ⧉ copies the full address, and hovering shows the full token and
+      Manifest market addresses. (Hidden on phones, where the header only has room for price,
+      change and high.)
+
+15. Is there any more token we can add? What happens when they search for a token that has a market in manifest but it's not on our list?
+
+   >> How it works now:
+      - About 3,870 Manifest markets exist; 2,341 have resting orders and are listed. Empty ones
+        are hidden from the default list because there's nothing to trade.
+      - Searching by MINT ADDRESS always finds every market for that token, empty or not, and
+        if a pairing doesn't exist it offers to create it (#9).
+      - NEW: searching by NAME/SYMBOL also checks Jupiter's verified list (3,873 tokens). A
+        verified token with no market at all shows under "Tokens with no market yet" with a
+        Create market button; a verified token whose only market is empty is listed with an
+        "empty" tag (e.g. "letsbonk" finds LetsBONK/SOL).
+      - Unverified tokens (like SKIRM today) are only found by symbol if they have an active
+        market; otherwise paste the mint. That's deliberate: anyone can mint a fake token
+        called "USDC" or "SKIRM", so matching unverified tokens by name would surface scams.
+      So effectively every Solana token can be traded here: the 2,341 active markets, any
+      verified token by name, and any token at all by mint.
+

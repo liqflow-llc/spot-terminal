@@ -5,7 +5,7 @@
 //   node backend/scripts/backfill-ledger.mjs --write   # appends them to data/ledger.json
 //
 // Idempotent (ledger keys), so running it twice adds nothing new. Stop the app first when
-// writing (pm2 stop spot-aggregator), or the running app may overwrite the file with its own copy.
+// writing (pm2 stop spot-terminal), or the running app may overwrite the file with its own copy.
 import fs from 'fs';
 import path from 'path';
 import { PublicKey } from '@solana/web3.js';
