@@ -7,6 +7,7 @@ import Modal from './Modal.jsx';
 import { useToast } from './Toasts.jsx';
 import { getJSON, postJSON } from '../services/api';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
+import { CONTACT_EMAIL } from '../legal/legalMeta.js';
 import '../legal/Legal.css';
 import './AccountPage.css';
 import { reportError } from '../services/report';
@@ -251,6 +252,7 @@ export default function AccountPage() {
         <p className="legal-links account-legal">
           <Link to="/terms">Terms of Service</Link>
           <Link to="/privacy">Privacy Policy</Link>
+          <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>
         </p>
       </main>
     </div>
