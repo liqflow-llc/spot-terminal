@@ -13,7 +13,7 @@
 server {
     listen 80;
     server_name spotterminal.com www.spotterminal.com;
-    return 301 https://$host$request_uri;
+    return 301 https://spotterminal.com$request_uri;  # one hop: http://www -> apex directly
 }
 
 server {
