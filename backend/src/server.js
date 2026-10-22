@@ -862,17 +862,22 @@ app.get('/robots.txt', (req, res) => {
     ].join('\n'));
 });
 
-// The home page, the legal pages, and the markets worth finding: both tokens verified and
-// trading, busiest first.
-app.get('/sitemap.xml', (req, res) => {
-    const origin = siteOrigin(req);
-    const today = new Date().toISOString().slice(0, 10);
-    const tradable = markets.allSummaries()
+// The markets worth finding: both tokens verified and trading, busiest first. Shared by the
+// sitemap and the crawlable links in each page's server-rendered body.
+function findableMarkets(limit) {
+    return markets.allSummaries()
         .filter(s => s.bidCount + s.askCount > 0)
         .map(marketView)
         .filter(v => v.base.verified && v.quote.verified)
         .sort((a, b) => (b.volume24hUsd ?? 0) - (a.volume24hUsd ?? 0))
-        .slice(0, 1000);
+        .slice(0, limit);
+}
+
+// The home page, the legal pages, and the markets worth finding.
+app.get('/sitemap.xml', (req, res) => {
+    const origin = siteOrigin(req);
+    const today = new Date().toISOString().slice(0, 10);
+    const tradable = findableMarkets(1000);
     const url = (loc, priority, freq) => `  <url><loc>${escapeHtml(origin + loc)}</loc><lastmod>${today}</lastmod><changefreq>${freq}</changefreq><priority>${priority}</priority></url>`;
     const body = [
         url('/', '1.0', 'daily'),
@@ -914,6 +919,46 @@ function formatNumber(n) {
     return n >= 1 ? n.toLocaleString('en-US', { maximumFractionDigits: n >= 100 ? 2 : 4 }) : n.toPrecision(4);
 }
 
+// Crawlable content for #root. Without it every page reached Google as the same empty shell
+// (the SPA draws everything client-side), so Search Console sat on 1,000 market pages as
+// "Discovered - currently not indexed": identical bodies, and no HTML links pointing at
+// them -- they were reachable only from the sitemap. React's createRoot replaces this
+// on mount, so people never see it; it states the same figures the page then shows.
+const SEO_HIDDEN = 'position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap';
+const usdCompact = (n) => n == null ? null
+    : n >= 1e9 ? `$${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `$${(n / 1e6).toFixed(2)}M`
+    : n >= 1e3 ? `$${(n / 1e3).toFixed(1)}K` : `$${n.toFixed(0)}`;
+const marketLinks = (list, heading) => list.length ? `<nav aria-label="${escapeHtml(heading)}"><h2>${escapeHtml(heading)}</h2><ul>${
+    list.map(v => `<li><a href="/trade/${escapeHtml(v.address)}">${escapeHtml(v.symbol)}${v.base.name ? ` (${escapeHtml(v.base.name)})` : ''}</a></li>`).join('')
+}</ul></nav>` : '';
+
+function seoBody(req) {
+    const m = req.path.match(/^\/trade\/([1-9A-HJ-NP-Za-km-z]{32,44})$/);
+    const s = m && markets.summary(m[1]);
+    if (s) {
+        const v = marketView(s);
+        const name = v.base.name || v.base.symbol;
+        const facts = [
+            v.last != null && `Last price ${formatNumber(v.last)} ${v.quote.symbol}`,
+            v.change24h != null && `${v.change24h >= 0 ? '+' : ''}${(v.change24h * 100).toFixed(2)}% over 24 hours`,
+            v.volume24hUsd != null && `${usdCompact(v.volume24hUsd)} traded in the last 24 hours`,
+            v.bestBid != null && v.bestAsk != null && `best bid ${formatNumber(v.bestBid)}, best ask ${formatNumber(v.bestAsk)}`,
+        ].filter(Boolean);
+        const related = findableMarkets(30).filter(o => o.address !== v.address).slice(0, 24);
+        return `<article style="${SEO_HIDDEN}"><h1>${escapeHtml(name)} (${escapeHtml(v.symbol)}) order book on Solana</h1>`
+            + (facts.length ? `<p>${escapeHtml(facts.join('; '))}.</p>` : '')
+            + `<p>Trade ${escapeHtml(name)} against ${escapeHtml(v.quote.symbol)} on a Solana on-chain order book with zero trading fees. Limit orders settle straight to your wallet when they fill.</p>`
+            + `<p><a href="/">All Solana order books</a></p>`
+            + marketLinks(related, 'Other active markets') + '</article>';
+    }
+    if (req.path === '/') {
+        return `<article style="${SEO_HIDDEN}"><h1>${escapeHtml(config.brand)}: Solana order books</h1>`
+            + `<p>${escapeHtml(DEFAULT_DESCRIPTION)}</p>`
+            + marketLinks(findableMarkets(60), 'Most active markets') + '</article>';
+    }
+    return '';
+}
+
 function renderIndex(html, req, { found = true } = {}) {
     const { title, description } = pageMeta(req);
     const origin = siteOrigin(req);
@@ -948,9 +993,11 @@ function renderIndex(html, req, { found = true } = {}) {
             publisher: { '@type': 'Organization', name: 'LiqFlow LLC', email: 'support@liqflow.app' },
         }).replace(/</g, '\\u003c')}</script>`] : []),
     ].join('\n    ');
+    const body = found ? seoBody(req) : '';
     return html
         .replace(/<title>[^<]*<\/title>/, `<title>${escapeHtml(title)}</title>`)
-        .replace(/<meta name="description"[^>]*>/, tags);
+        .replace(/<meta name="description"[^>]*>/, tags)
+        .replace('<div id="root"></div>', `<div id="root">${body}</div>`);
 }
 
 // Tests point FRONTEND_DIST at a separate build so they never overwrite what production serves.
