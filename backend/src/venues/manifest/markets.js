@@ -239,6 +239,14 @@ export class ManifestMarkets extends EventEmitter {
         return [...m.bids(), ...m.asks()];
     }
 
+    /** The same, by side: { bids, asks }. */
+    allOrdersBySide(address) {
+        const raw = this.raw.get(address);
+        if (!raw) return { bids: [], asks: [] };
+        const m = Market.loadFromBuffer({ address: new PublicKey(address), buffer: raw });
+        return { bids: m.bids(), asks: m.asks() };
+    }
+
     get(address) {
         return this.markets.get(address) || null;
     }

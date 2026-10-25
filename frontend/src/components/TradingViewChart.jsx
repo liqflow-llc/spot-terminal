@@ -223,8 +223,9 @@ export default function TradingViewChart({ address, market, ammOnly = false, onT
       const left = o.remaining != null ? o.remaining : o.size;
       chart.createShape({ price: o.price }, {
         shape: 'horizontal_line',
-        text: `${o.side === 'buy' ? 'Buy' : 'Sell'} ${formatQty(left)}${o.status === 'expired' ? ' · expired' : o.status === 'open' ? ' · drag to edit' : ''}`,
-        lock: o.status !== 'open',
+        // Orders found only on-chain can't be edited here (no payout of ours to replace).
+        text: `${o.side === 'buy' ? 'Buy' : 'Sell'} ${formatQty(left)}${o.status === 'expired' ? ' · expired' : o.status === 'open' && o.source !== 'chain' ? ' · drag to edit' : ''}`,
+        lock: o.status !== 'open' || o.source === 'chain',
         disableSave: true,
         disableUndo: true,
         overrides: { linecolor: color, linestyle: 2, linewidth: 1, showLabel: true, textcolor: color, horzLabelsAlign: 'left', vertLabelsAlign: 'bottom', fontsize: 11, bold: true },

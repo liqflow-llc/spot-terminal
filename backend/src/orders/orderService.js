@@ -1222,6 +1222,7 @@ export class OrderService {
 
     async prepareCancel({ wallet, orderId }) {
         const walletPk = parseWallet(wallet);
+        if (String(orderId).startsWith('chain:')) return this.prepareCancelChainOrder(walletPk, String(orderId));
         const order = this.store.get(orderId);
         if (!order || order.wallet !== walletPk.toBase58()) throw new UserError('Order not found');
         // A remainder left resting after its near-full payout: its nonce was used by that payout
@@ -1250,6 +1251,36 @@ export class OrderService {
         this.pending.set(id, {
             kind: 'cancel', orderId, remainder, market: order.market, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight,
             moves: withdrawMoves(ctx, withdrawn), fills: [{ orderId, filledAtoms: this.filledSoFar(order) }],
+        });
+        return { step: 'sign', id, transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')], summary: { title: 'Cancel order', detail: 'Cancels the order and returns its funds to your wallet.' } };
+    }
+
+    /**
+     * Cancel a resting order this server has no record of ("chain:<market>:<sequence number>", as
+     * /api/account lists them) and withdraw everything free in that market. No nonce to advance:
+     * any payout pre-signed for it is held by whichever server placed it, and this cancel makes it
+     * useless. Not in the tax ledger, whose deposits this order never went through.
+     */
+    async prepareCancelChainOrder(walletPk, orderId) {
+        const [, market, sequenceNumber] = orderId.split(':');
+        if (!market || !/^\d+$/.test(sequenceNumber || '')) throw new UserError('Order not found');
+        const ctx = await this.loadContext(walletPk, market);
+        const resting = this.markets.allOrders(market).find(o => o.sequenceNumber.toString() === sequenceNumber);
+        if (!resting) throw new UserError('This order is no longer on the book.');
+        if (!resting.trader.equals(walletPk)) throw new UserError('Order not found');
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+        const tx = new Transaction({ feePayer: walletPk, blockhash, lastValidBlockHeight });
+        tx.add(...priorityIxs(CANCEL_CU));
+        tx.add(batchUpdateIx({
+            trader: walletPk, market, baseMint: ctx.baseMint, quoteMint: ctx.quoteMint,
+            baseTokenProgram: ctx.baseTokenProgram, quoteTokenProgram: ctx.quoteTokenProgram,
+            globals: ctx.globals, cancel: [sequenceNumber],
+        }));
+        await this.appendWithdrawAll(tx, walletPk, ctx);
+        const id = crypto.randomUUID();
+        this.pending.set(id, {
+            kind: 'cancel', orderId: null, market, wallet: walletPk.toBase58(), createdAt: Date.now(), messages: [tx.serializeMessage()], blockhash, lastValidBlockHeight,
+            moves: [], fills: [],
         });
         return { step: 'sign', id, transactions: [tx.serialize({ requireAllSignatures: false }).toString('base64')], summary: { title: 'Cancel order', detail: 'Cancels the order and returns its funds to your wallet.' } };
     }

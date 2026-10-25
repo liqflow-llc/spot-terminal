@@ -43,6 +43,7 @@ export function formatTime(ms) {
 }
 
 export function formatDateTime(ms) {
+  if (ms == null) return '—';
   const d = new Date(ms);
   return `${d.toLocaleDateString('en-CA')} ${d.toLocaleTimeString('en-GB', { hour12: false })}`;
 }

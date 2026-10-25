@@ -634,9 +634,66 @@ app.get('/api/account', rateLimit('account', 40, 60_000), async (req, res) => {
         if (resting.has(o.sequenceNumber)) o.remaining = resting.get(o.sequenceNumber);
         else if (!(o.placeSlot && o.placeSlot > dataSlot)) o.remaining = 0;
     }
+    out.orders.push(...chainOnlyOrders(walletPk, out.orders));
     res.set('Cache-Control', 'no-cache');
     res.json(out);
 });
+
+// The chain is the record of what's open: every Manifest market lists each resting order with
+// its trader. Orders of this wallet that this server has no record of (placed through another
+// SpotTerminal, another app, or with this server's data lost) are listed from there, marked
+// `source: 'chain'`: they can be cancelled, but have no automatic payout (that's a transaction
+// the wallet pre-signed for the server that placed the order).
+const SEAT_CACHE_MS = 60_000;
+const seatCache = new Map(); // wallet -> { at, markets: [address] }
+function seatMarkets(walletPk) {
+    const wallet = walletPk.toBase58();
+    const hit = seatCache.get(wallet);
+    if (hit && Date.now() - hit.at < SEAT_CACHE_MS) return hit.markets;
+    const list = [];
+    for (const [address, market] of markets.markets) if (market.hasSeat(walletPk)) list.push(address);
+    seatCache.set(wallet, { at: Date.now(), markets: list });
+    if (seatCache.size > 2000) seatCache.delete(seatCache.keys().next().value);
+    return list;
+}
+
+function chainOnlyOrders(walletPk, known) {
+    const wallet = walletPk.toBase58();
+    const knownKeys = new Set(known.filter(o => o.sequenceNumber).map(o => `${o.market}:${o.sequenceNumber}`));
+    const out = [];
+    for (const address of seatMarkets(walletPk)) {
+        const s = markets.summary(address);
+        if (!s) continue;
+        const { bids, asks } = markets.allOrdersBySide(address);
+        for (const [side, list] of [['buy', bids], ['sell', asks]]) {
+            for (const r of list) {
+                if (!r.trader.equals(walletPk)) continue;
+                const seq = r.sequenceNumber.toString();
+                if (knownKeys.has(`${address}:${seq}`)) continue;
+                const lastValidSlot = Number(r.lastValidSlot) || 0;
+                const left = Number(r.numBaseTokens);
+                out.push({
+                    id: `chain:${address}:${seq}`,
+                    source: 'chain',
+                    wallet,
+                    market: address,
+                    symbol: `${registry.display(s.baseMint).symbol}/${registry.display(s.quoteMint).symbol}`,
+                    baseMint: s.baseMint,
+                    quoteMint: s.quoteMint,
+                    side,
+                    isBid: side === 'buy',
+                    price: r.tokenPrice,
+                    size: left,
+                    remaining: left,
+                    sequenceNumber: seq,
+                    status: lastValidSlot && lastValidSlot < markets.slot ? 'expired' : 'open',
+                    createdAt: null,
+                });
+            }
+        }
+    }
+    return out;
+}
 
 function publicOrder(o) {
     const { claimTx, nearClaimTx, ...rest } = o;

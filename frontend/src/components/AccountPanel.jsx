@@ -69,7 +69,8 @@ export default function AccountPanel({ account, market, wallet, onChange, action
     else if (action.type === 'edit' && action.order.status === 'open') setEditing({ ...action.order, initialPrice: action.price });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [action]);
-  const cancellable = open.filter(o => o.market === market?.address && (o.status === 'open' || o.status === 'expired'));
+  // Cancel all covers the orders this server placed (on-chain-only ones are cancelled one by one).
+  const cancellable = open.filter(o => o.market === market?.address && o.source !== 'chain' && (o.status === 'open' || o.status === 'expired'));
   const cancelAll = () => run('cancel-all', { url: '/api/orders/cancel-all', body: { market: market.address } }, 'Orders cancelled, funds returned');
   const withdraw = () => run('withdraw', { url: '/api/orders/withdraw', body: { market: market.address } }, 'Withdrawn to wallet');
 
@@ -149,7 +150,9 @@ function OrdersTable({ orders, market, onCancel, onEdit, busy, empty }) {
               <td className="r num">{formatAmount(o.size)}</td>
               <td className="r num">{filled == null ? '—' : `${Math.max(0, Math.min(100, filled * 100)).toFixed(1)}%`}</td>
               <td>
-                {isDustLeft(o)
+                {o.source === 'chain'
+                  ? <span className={`status ${o.status}`} title="Found on the blockchain: placed through another SpotTerminal or app, so this site has no record of it. You can cancel it here; it has no automatic payout, so collect any fill from the Account page.">{STATUS[o.status] || o.status} · on-chain</span>
+                  : isDustLeft(o)
                   ? <span className="status claiming" title={`Filled except ${formatAmount(o.remaining)}, too little for anyone to take, so the automatic payout can't run. Collect moves everything to your wallet.`}>Filled · collect</span>
                   : o.status === 'claimed' && o.remainderOnBook
                     ? <span className="status claimed" title="Paid out. What was left (worth under $5) is still on the book; cancel it and withdraw from the Account page.">Filled · paid to wallet*</span>
@@ -158,7 +161,7 @@ function OrdersTable({ orders, market, onCancel, onEdit, busy, empty }) {
               </td>
               {onCancel && <td className="num muted">{o.status === 'expired' ? 'expired' : (expiresIn(o) || 'never')}</td>}
               <td className="r ap-actions">
-                {onEdit && o.status === 'open' && !isDustLeft(o) && o.market === market?.address && (
+                {onEdit && o.status === 'open' && o.source !== 'chain' && !isDustLeft(o) && o.market === market?.address && (
                   <button type="button" className="btn small" disabled={!!busy} onClick={() => onEdit(o)}>Edit</button>
                 )}
                 {onCancel && (o.status === 'open' || o.status === 'expired') && (
