@@ -30,7 +30,7 @@ const JUP_SWAPS_EVENT = '982f4eebc0606e6a'; // Vec<{ input_mint, input_amount, o
 const JUP_SWAP_EVENT = '40c6cde8260871e2';  // { amm, input_mint, input_amount, output_mint, output_amount }
 const HISTORY_DAYS = Number(process.env.HISTORY_DAYS) || 365;
 const FETCH_BATCH = 4;        // transactions per RPC call
-const FETCH_GAP_MS = 700;     // between calls, shared by all scans: leaves the RPC plan room for the app
+const FETCH_GAP_MS = 1000;    // between calls, shared by all scans: ~4/s leaves the RPC plan room for the app
 const VERSION = 2; // bump when parseTransaction records more: caches are re-read
 // A cancelled order's fills are in its takers' transactions: read the market's transactions
 // between its placement and its cancel, when there are at most this many (quiet markets).

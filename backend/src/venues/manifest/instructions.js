@@ -90,7 +90,7 @@ export function orderEconomics({ isBid, baseAtoms, mantissa, exponent }) {
 // which transactions were SpotTerminal's (for the tax export). No accounts: nobody else must sign.
 export const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
 export const SPOTTERMINAL_MEMO = 'SpotTerminal';
-export const MEMO_CU = 2_000;
+export const MEMO_CU = 10_000; // it uses ~6,000 (measured on mainnet)
 export const memoIx = () => new TransactionInstruction({ programId: MEMO_PROGRAM_ID, keys: [], data: Buffer.from(SPOTTERMINAL_MEMO) });
 
 export function claimSeatIx({ trader, market }) {
