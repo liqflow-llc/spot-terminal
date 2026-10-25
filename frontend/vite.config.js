@@ -19,6 +19,9 @@ export default defineConfig({
             },
         },
     },
+    // Pre-bundle the Buffer shim the polyfill plugin injects. Found only once the page loads, it
+    // made Vite reload the page on a first `npm run dev` (cutting off a wallet connection).
+    optimizeDeps: { include: ['vite-plugin-node-polyfills/shims/buffer'] },
     server: {
         port: 5180,
         proxy: { '/api': { target: 'http://127.0.0.1:3020', changeOrigin: true } },
