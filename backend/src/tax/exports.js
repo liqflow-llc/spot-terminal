@@ -80,14 +80,24 @@ export function buildRows(entries, token, { year = null } = {}) {
                 description: `${PLATFORM} limit order ${t.side} ${base.amount} ${base.symbol} at ${Number(t.price).toPrecision(8).replace(/\.?0+$/, '')} ${quote.symbol} (order ${e.orderId?.includes(':') ? `#${e.orderId.split(':')[1]}` : e.orderId?.slice(0, 8)})`,
             });
         }
-        for (const [i, m] of (e.moves || []).entries()) {
-            const a = asset(m.mint, m.atoms);
-            rows.push({
-                at: e.at, type: m.dir === 'in' ? 'deposit' : 'withdrawal', id: `${e.key}:${i}`, txHash: e.sig,
-                [m.dir === 'in' ? 'received' : 'sent']: a,
-                description: `${PLATFORM}: ${m.rent ? (m.dir === 'in' ? DESCRIBE.setup : DESCRIBE.closePayout) : DESCRIBE[e.kind] || e.kind}`,
-            });
+        // One row per token and direction per transaction: the tax app pairs it with the single
+        // movement its own import of the wallet shows for that transaction, as a transfer between
+        // the user's accounts. (Rent into payout accounts isn't spent, and coming back isn't
+        // income: only the network fee is a cost. Two half-size rows might not pair.)
+        const groups = new Map(); // `${mint}:${dir}` -> { mint, dir, atoms, why: Set }
+        for (const m of e.moves || []) {
+            const k = `${m.mint}:${m.dir}`;
+            const g = groups.get(k) || groups.set(k, { mint: m.mint, dir: m.dir, atoms: 0n, why: new Set() }).get(k);
+            g.atoms += BigInt(m.atoms);
+            g.why.add(m.rent ? (m.dir === 'in' ? DESCRIBE.setup : DESCRIBE.closePayout) : DESCRIBE[e.kind] || e.kind);
         }
+        [...groups.values()].forEach((g, i) => {
+            rows.push({
+                at: e.at, type: g.dir === 'in' ? 'deposit' : 'withdrawal', id: `${e.key}:${i}`, txHash: e.sig,
+                [g.dir === 'in' ? 'received' : 'sent']: asset(g.mint, g.atoms),
+                description: `${PLATFORM}: ${[...g.why].join(' + ')}`,
+            });
+        });
     }
     return rows.sort((a, b) => a.at - b.at);
 }

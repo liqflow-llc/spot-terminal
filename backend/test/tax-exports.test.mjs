@@ -66,5 +66,17 @@ const odd = exportCsv('koinly', buildRows([{ ...entries[0], key: 'k', kind: 'wei
 assert.equal(odd.split('\r\n')[1].split(',').length >= 12, true);
 assert.match(odd, /"SpotTerminal: weird, ""kind"""/);
 
+// Several moves of one token in one transaction (two payout accounts' rent, or rent plus order
+// funds) are one row, so the tax app can pair it with the wallet's single movement as a transfer.
+const merged = buildRows([
+    { key: 'setup:S5', wallet: W, kind: 'setup', at: t0, sig: 'S5', moves: [{ mint: SOL, atoms: '1056640', dir: 'in', rent: true }, { mint: SOL, atoms: '1056640', dir: 'in', rent: true }] },
+    { key: 'place:S6', wallet: W, kind: 'place', at: t0 + 1, sig: 'S6', moves: [{ mint: SOL, atoms: '10000000001', dir: 'in' }, { mint: SOL, atoms: '1056640', dir: 'in', rent: true }] },
+], token);
+assert.equal(merged.length, 2);
+assert.equal(merged[0].received.amount, '0.00211328');
+assert.equal(merged[0].description, 'SpotTerminal: payout-account rent deposit (refundable)');
+assert.equal(merged[1].received.amount, '10.001056641');
+assert.equal(merged[1].description, 'SpotTerminal: funds for a limit order + payout-account rent deposit (refundable)');
+
 console.log('tax exports: all formats OK');
 for (const a of TAX_APPS) console.log(`\n--- ${a} ---\n${files[a].slice(0, 5).join('\n')}`);

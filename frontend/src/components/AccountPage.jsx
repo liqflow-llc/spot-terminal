@@ -280,6 +280,11 @@ export default function AccountPage() {
             your wallet&apos;s transaction IDs, so the app pairs it as transfers between your own accounts, and each
             limit order fill is a trade at your order&apos;s price.
           </p>
+          <p className="muted small">
+            That includes the payout accounts&apos; rent: it isn&apos;t spent, it moves to an account you control and comes
+            back when you close it, so it&apos;s a non-taxable transfer both ways (only network fees are a cost). There&apos;s
+            no need to add the payout accounts to your tax app as wallets; that would count the rent twice.
+          </p>
           {!wallet ? (
             <div className="account-row">Connect your wallet to download your reports.</div>
           ) : !tax ? (
