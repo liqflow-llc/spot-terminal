@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import express from 'express';
-import { PublicKey } from '@solana/web3.js';
+import { NONCE_ACCOUNT_LENGTH, NonceAccount, PublicKey, SystemProgram } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { config } from './config.js';
 import { connection } from './solana.js';
@@ -22,6 +22,7 @@ import { errorDetail, log, short, takeProblemCounts } from './log.js';
 import { takeRpcStats } from './rpcStats.js';
 import { startLogRotation } from './logRotate.js';
 import { Notifier } from './notify.js';
+import { ChainHistory, deriveHistory } from './history/chainHistory.js';
 import { getIpfsIcon } from './tokens/ipfsIcons.js';
 
 const registry = new TokenRegistry({ heliusRpc: config.rpcUrl, jupApiKey: config.jupApiKey });
@@ -694,6 +695,55 @@ function chainOnlyOrders(walletPk, known) {
     }
     return out;
 }
+
+// The wallet's history from its own transactions on-chain (history/chainHistory.js): Manifest orders
+// placed through any app and Jupiter swaps, and the payout accounts it set up. The first request
+// starts a background scan (the last HISTORY_DAYS days); poll until `scan.done`.
+const chainHistory = new ChainHistory();
+const payoutCheck = new Map(); // wallet -> { at, key, accounts }
+async function livePayoutAccounts(walletPk, addresses) {
+    const wallet = walletPk.toBase58();
+    const key = addresses.join(',');
+    const hit = payoutCheck.get(wallet);
+    if (hit && hit.key === key && Date.now() - hit.at < 60_000) return hit.accounts;
+    const infos = addresses.length ? await connection.getMultipleAccountsInfo(addresses.map(a => new PublicKey(a)), 'confirmed') : [];
+    const known = new Set(orderStore.noncesFor(wallet));
+    const accounts = [];
+    addresses.forEach((address, i) => {
+        const info = infos[i];
+        if (!info || !info.owner.equals(SystemProgram.programId) || info.data.length !== NONCE_ACCOUNT_LENGTH) return;
+        if (!NonceAccount.fromAccountData(info.data).authorizedPubkey.equals(walletPk)) return;
+        accounts.push({ address, lamports: info.lamports, knownHere: known.has(address) });
+    });
+    payoutCheck.set(wallet, { at: Date.now(), key, accounts });
+    if (payoutCheck.size > 2000) payoutCheck.delete(payoutCheck.keys().next().value);
+    return accounts;
+}
+
+app.get('/api/history', rateLimit('account', 40, 60_000), async (req, res) => {
+    let walletPk;
+    try {
+        walletPk = new PublicKey(String(req.query.wallet));
+    } catch {
+        return res.status(400).json({ error: 'Invalid wallet' });
+    }
+    try {
+        const h = chainHistory.get(walletPk.toBase58());
+        await registry.ensure(h.items.flatMap(i => (i.swap ? [i.swap.inMint, i.swap.outMint] : [])));
+        const display = (m) => registry.display(m);
+        const d = deriveHistory(h.items, { markets, decimals: m => display(m).decimals, symbol: m => display(m).symbol });
+        res.set('Cache-Control', 'no-cache');
+        res.json({
+            orders: d.orders,
+            trades: d.trades,
+            payoutAccounts: await livePayoutAccounts(walletPk, d.payoutAccounts).catch(() => []),
+            scan: { scanning: h.scanning, done: h.done, scanned: h.scanned, sinceDays: h.sinceDays },
+        });
+    } catch (err) {
+        log.warn('api', 'history_failed', { wallet: short(walletPk.toBase58()), msg: errorDetail(err) });
+        res.status(502).json({ error: 'Could not read the history.' });
+    }
+});
 
 function publicOrder(o) {
     const { claimTx, nearClaimTx, ...rest } = o;

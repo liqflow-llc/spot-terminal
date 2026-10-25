@@ -108,6 +108,9 @@ As of October 4, 2026:
   - `marketdata/` trades, 1m candles (GeckoTerminal backfill), aggregated books, all-DEX chart
   - `orders/` order service (prepare/verify/submit/cancel, Jupiter swaps), order store, keeper,
     ledger (what moved into / out of SpotTerminal and every fill, per wallet)
+  - `history/chainHistory.js` a wallet's history from its own transactions on-chain: Manifest
+    orders placed through any app (placements, cancels, deposits, withdrawals, fills on arrival),
+    Jupiter swaps and payout accounts. `data/history/` only caches parsed transactions.
   - `tax/exports.js` CSV exports for Koinly, CoinTracker, CoinLedger, Awaken and CoinTracking
   - `test/localnet-e2e.mjs` end-to-end tests against the real Manifest program on a local validator
   - `test/tx-e2e.mjs` transaction failure modes (slow/rejected/changed approvals, stale state)

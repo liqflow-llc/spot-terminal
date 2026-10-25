@@ -29,6 +29,7 @@ const { OrderStore } = await import('../src/orders/orderStore.js');
 const { OrderService } = await import('../src/orders/orderService.js');
 const { Keeper, loadKeeperKeypair } = await import('../src/orders/keeper.js');
 const { Ledger } = await import('../src/orders/ledger.js');
+const { ChainHistory, deriveHistory } = await import('../src/history/chainHistory.js');
 
 const NATIVE = spl.NATIVE_MINT;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -458,6 +459,31 @@ await test('Filled all but a remainder too small to wait for → near-full payou
     assert.equal(store.get(next.id).status, 'open', 'the order on the reused nonce is untouched');
     await swap(mBQ, { baseIn: false, inAtoms: 60_000_000n });
     await waitFor(() => store.get(next.id).status === 'claimed', 'the next order still pays out');
+});
+
+await test('History rebuilt from the chain matches every order the server recorded', async () => {
+    const wallet = maker.publicKey.toBase58();
+    const history = new ChainHistory();
+    await history.scan(wallet);
+    for (const m of [mBQ, mBS]) await markets.refresh(m);
+    const d = deriveHistory(history.state(wallet).items, { markets, decimals: () => 6, symbol: m => m.slice(0, 4) });
+    const byKey = new Map(d.orders.map(o => [`${o.market}:${o.sequenceNumber}`, o]));
+    const recorded = store.forWallet(wallet).filter(o => o.sequenceNumber && o.placeSignature);
+    log('recorded orders', recorded.length, '| from the chain', d.orders.length, '| statuses', JSON.stringify(d.orders.reduce((c, o) => ({ ...c, [o.status]: (c[o.status] || 0) + 1 }), {})));
+    for (const o of recorded) {
+        const c = byKey.get(`${o.market}:${o.sequenceNumber}`);
+        assert.ok(c, `order ${o.id.slice(0, 8)} (${o.side} ${o.price}) found on chain`);
+        assert.equal(c.side, o.side);
+        assert.ok(Math.abs(c.price / o.price - 1) < 1e-9, `price ${c.price} vs ${o.price}`);
+        assert.ok(Math.abs(c.size - Number(o.baseAtoms) / 10 ** o.baseDecimals) < 1e-9, 'size');
+        const expected = o.status === 'claimed' ? (o.remainderOnBook === false ? ['cancelled'] : o.remainderOnBook ? ['open'] : ['filled'])
+            : o.status === 'cancelled' ? ['cancelled', 'filled'] // a cancel that found it already filled
+                : o.status === 'expired' ? ['expired'] : [o.status];
+        assert.ok(expected.includes(c.status), `order ${o.id.slice(0, 8)}: recorded ${o.status}, chain says ${c.status}`);
+        if (c.status === 'filled') assert.equal(c.filled, c.size);
+    }
+    // Payout accounts: what the wallet set up and didn't close is what the store holds.
+    assert.deepEqual([...d.payoutAccounts].sort(), [...store.noncesFor(wallet)].sort(), 'payout accounts match');
 });
 
 await test('Tax ledger reconciles with the chain: deposits − withdrawals ± fills = what SpotTerminal holds, per token', async () => {

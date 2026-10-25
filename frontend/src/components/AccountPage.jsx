@@ -56,6 +56,15 @@ export default function AccountPage() {
   }, [wallet]);
   useEffect(loadFunds, [loadFunds]);
 
+  // Payout accounts the chain shows this wallet set up through another SpotTerminal server.
+  const [chainPayout, setChainPayout] = useState([]);
+  useEffect(() => {
+    if (!wallet) return setChainPayout([]);
+    let live = true;
+    getJSON(`/api/history?wallet=${wallet}`).then(r => live && setChainPayout((r.payoutAccounts || []).filter(a => !a.knownHere))).catch(() => {});
+    return () => { live = false; };
+  }, [wallet, payout]);
+
   async function moveFunds(m) {
     setBusy(`funds:${m.market}`);
     try {
@@ -171,7 +180,7 @@ export default function AccountPage() {
             </p>
           )}
 
-          {wallet && payout?.accounts.length > 0 && (
+          {wallet && (payout?.accounts.length > 0 || chainPayout.length > 0) && (
             <>
               <h3>Payout accounts</h3>
               <p className="muted small">
@@ -180,7 +189,14 @@ export default function AccountPage() {
                 (below).
               </p>
               <ul className="payout-list">
-                {payout.accounts.map(a => (
+                {chainPayout.map(a => (
+                  <li key={a.address}>
+                    <a href={explorerAccount(a.address)} target="_blank" rel="noreferrer" className="num">{shortAddr(a.address)}</a>
+                    <span className="num">{sol(a.lamports / 1e9)}</span>
+                    <span className="muted" title="Found on the blockchain: set up through another SpotTerminal server, which may be using it for an order's payout.">found on-chain</span>
+                  </li>
+                ))}
+                {(payout?.accounts || []).map(a => (
                   <li key={a.address}>
                     <a href={explorerAccount(a.address)} target="_blank" rel="noreferrer" className="num">{shortAddr(a.address)}</a>
                     <span className="num">{sol(a.lamports / 1e9)}</span>

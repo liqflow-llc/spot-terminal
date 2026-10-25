@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 import { useToast } from './Toasts.jsx';
-import { postJSON } from '../services/api';
+import { getJSON, postJSON } from '../services/api';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
 import { formatAmount, formatDateTime, formatPrice } from '../utils/format';
 import { reportError } from '../services/report';
@@ -23,7 +23,11 @@ const STATUS = {
   claim_failed: 'Filled · withdraw needed',
   expired: 'Expired · withdraw',
   replacing: 'Updating',
+  filled: 'Filled',
 };
+// Trades from the wallet's history that weren't resting orders.
+const TRADE_STATUS = { jupiter: 'Swap · Jupiter', manifest: 'Market · Manifest' };
+const HISTORY_POLL_MS = 5000;
 
 // An open order filled all but a sliver: its pre-signed payout is for the full amount, so it waits
 // on a remainder nobody will take. Cancelling collects everything (one approval).
@@ -40,7 +44,30 @@ export default function AccountPanel({ account, market, wallet, onChange, action
 
   const orders = account?.orders || [];
   const open = orders.filter(o => OPEN.has(o.status));
-  const history = orders.filter(o => !OPEN.has(o.status));
+
+  // History: this server's records, plus what the chain shows (orders placed anywhere, and Jupiter
+  // and Manifest market trades), read in the background the first time (see /api/history).
+  const [chain, setChain] = useState(null);
+  useEffect(() => {
+    if (!wallet || tab !== 'Order history') return undefined;
+    let live = true, timer = null;
+    const load = () => getJSON(`/api/history?wallet=${wallet}`)
+      .then((r) => {
+        if (!live) return;
+        setChain(r);
+        if (!r.scan?.done) timer = setTimeout(load, HISTORY_POLL_MS);
+      })
+      .catch(() => live && setChain(c => c || { orders: [], trades: [], scan: { done: true, failed: true } }));
+    load();
+    return () => { live = false; clearTimeout(timer); };
+  }, [wallet, tab]);
+  useEffect(() => setChain(null), [wallet]);
+  const recorded = new Set(orders.filter(o => o.sequenceNumber).map(o => `${o.market}:${o.sequenceNumber}`));
+  const history = [
+    ...orders.filter(o => !OPEN.has(o.status)),
+    ...(chain?.orders || []).filter(o => !OPEN.has(o.status) && !recorded.has(`${o.market}:${o.sequenceNumber}`)),
+    ...(chain?.trades || []).map(t => ({ ...t, status: 'trade', filled: t.size })),
+  ].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
 
   async function run(key, request, successTitle) {
     setBusy(key);
@@ -109,8 +136,15 @@ export default function AccountPanel({ account, market, wallet, onChange, action
             onCancel={tab === 'Open orders' ? cancel : null}
             onEdit={tab === 'Open orders' ? setEditing : null}
             busy={busy}
-            empty={tab === 'Open orders' ? 'No open orders' : 'No past orders yet'}
+            empty={tab === 'Open orders' ? 'No open orders' : chain && !chain.scan?.done ? 'Reading your history from the blockchain…' : 'No past orders yet'}
           />
+        )}
+        {wallet && account && tab === 'Order history' && chain?.scan && (
+          <div className="ap-note muted">
+            {chain.scan.failed ? 'Couldn\'t read your on-chain history right now.'
+              : !chain.scan.done ? <><span className="spinner" /> Reading your history from the blockchain ({chain.scan.scanned} transactions so far)…</>
+              : `Includes your orders and swaps from the blockchain over the last ${chain.scan.sinceDays} days, wherever you placed them.`}
+          </div>
         )}
       </div>
       {editing && <EditOrderModal order={editing} onClose={() => setEditing(null)} onDone={onChange} />}
@@ -139,8 +173,8 @@ function OrdersTable({ orders, market, onCancel, onEdit, busy, empty }) {
       </thead>
       <tbody>
         {orders.map(o => {
-          const filled = o.status === 'claimed' ? 1 : o.remaining != null ? 1 - o.remaining / o.size : null;
-          const link = o.claimSignature || o.cancelSignature || o.placeSignature;
+          const filled = o.status === 'claimed' ? 1 : o.filled != null && o.size ? o.filled / o.size : o.remaining != null ? 1 - o.remaining / o.size : null;
+          const link = o.claimSignature || o.cancelSignature || o.placeSignature || o.signature;
           return (
             <tr key={o.id} className={o.market === market?.address ? '' : 'other-market'}>
               <td className="num muted">{formatDateTime(o.createdAt)}</td>
@@ -150,8 +184,12 @@ function OrdersTable({ orders, market, onCancel, onEdit, busy, empty }) {
               <td className="r num">{formatAmount(o.size)}</td>
               <td className="r num">{filled == null ? '—' : `${Math.max(0, Math.min(100, filled * 100)).toFixed(1)}%`}</td>
               <td>
-                {o.source === 'chain'
-                  ? <span className={`status ${o.status}`} title="Found on the blockchain: placed through another SpotTerminal or app, so this site has no record of it. You can cancel it here; it has no automatic payout, so collect any fill from the Account page.">{STATUS[o.status] || o.status} · on-chain</span>
+                {o.status === 'trade'
+                  ? <span className="status claimed" title="A trade your wallet made, read from the blockchain.">{TRADE_STATUS[o.venue] || 'Trade'}</span>
+                  : o.source === 'chain'
+                  ? <span className={`status ${o.status}`} title={OPEN.has(o.status)
+                    ? 'Found on the blockchain: placed through another SpotTerminal or app, so this site has no record of it. You can cancel it here; it has no automatic payout, so collect any fill from the Account page.'
+                    : 'Read from the blockchain (placed through another SpotTerminal or app). How much of a cancelled order filled is only known when the cancel also withdrew its proceeds.'}>{STATUS[o.status] || o.status} · on-chain</span>
                   : isDustLeft(o)
                   ? <span className="status claiming" title={`Filled except ${formatAmount(o.remaining)}, too little for anyone to take, so the automatic payout can't run. Collect moves everything to your wallet.`}>Filled · collect</span>
                   : o.status === 'claimed' && o.remainderOnBook
