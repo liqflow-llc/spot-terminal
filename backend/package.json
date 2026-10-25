@@ -24,5 +24,8 @@
   },
   "devDependencies": {
     "puppeteer-core": "^24.43.1"
+  },
+  "overrides": {
+    "bigint-buffer": "npm:@exodus/bigint-buffer@1.1.5-exodus.1"
   }
 }
