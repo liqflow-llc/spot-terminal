@@ -22,7 +22,7 @@ import { getAssociatedTokenAddressSync, NATIVE_MINT, TOKEN_2022_PROGRAM_ID, TOKE
 import { getGlobalAddress } from '@bonasa-tech/manifest-sdk';
 import { connection } from '../solana.js';
 import {
-    OrderType, ataIx, batchUpdateIx, claimSeatIx, depositIx, encodePrice, isNativeMint,
+    MEMO_CU, OrderType, ataIx, batchUpdateIx, claimSeatIx, depositIx, encodePrice, isNativeMint, memoIx,
     orderEconomics, quoteForBase, unwrapSolIx, withdrawIx, wrapSolIxs,
 } from '../venues/manifest/instructions.js';
 import { errorDetail, log, short } from '../log.js';
@@ -90,9 +90,11 @@ export function toAtoms(amount, decimals) {
     return BigInt(whole || '0') * 10n ** BigInt(decimals) + BigInt((frac + '0'.repeat(decimals)).slice(0, decimals) || '0');
 }
 
+// Every transaction we build starts with these: its compute budget and the SpotTerminal memo.
 const priorityIxs = (units) => [
-    ComputeBudgetProgram.setComputeUnitLimit({ units }),
+    ComputeBudgetProgram.setComputeUnitLimit({ units: units + MEMO_CU }),
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_MICROLAMPORTS }),
+    memoIx(),
 ];
 
 function parseWallet(wallet) {
@@ -138,6 +140,11 @@ export function buildJupiterTransaction(built, payer) {
         ...(built.otherInstructions || []),
         built.tipInstruction,
     ].filter(Boolean).map(toIx);
+    // The SpotTerminal memo, with room for it in Jupiter's compute-unit limit.
+    const SET_LIMIT = 2;
+    const limit = instructions.find(ix => ix.programId.equals(ComputeBudgetProgram.programId) && ix.data[0] === SET_LIMIT);
+    if (limit) limit.data.writeUInt32LE(limit.data.readUInt32LE(1) + MEMO_CU, 1);
+    instructions.push(memoIx());
     // Make sure it carries a priority fee (Jupiter's budget instructions may only set the CU limit).
     const SET_PRICE = 3;
     if (!instructions.some(ix => ix.programId.equals(ComputeBudgetProgram.programId) && ix.data[0] === SET_PRICE)) {

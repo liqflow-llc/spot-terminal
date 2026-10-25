@@ -77,7 +77,7 @@ export function buildRows(entries, token, { year = null } = {}) {
             rows.push({
                 at: e.at, type: 'trade', id: e.key,
                 sent: sell ? base : quote, received: sell ? quote : base,
-                description: `${PLATFORM} limit order ${t.side} ${base.amount} ${base.symbol} at ${Number(t.price).toPrecision(8).replace(/\.?0+$/, '')} ${quote.symbol} (order ${e.orderId?.slice(0, 8)})`,
+                description: `${PLATFORM} limit order ${t.side} ${base.amount} ${base.symbol} at ${Number(t.price).toPrecision(8).replace(/\.?0+$/, '')} ${quote.symbol} (order ${e.orderId?.includes(':') ? `#${e.orderId.split(':')[1]}` : e.orderId?.slice(0, 8)})`,
             });
         }
         for (const [i, m] of (e.moves || []).entries()) {
@@ -85,7 +85,7 @@ export function buildRows(entries, token, { year = null } = {}) {
             rows.push({
                 at: e.at, type: m.dir === 'in' ? 'deposit' : 'withdrawal', id: `${e.key}:${i}`, txHash: e.sig,
                 [m.dir === 'in' ? 'received' : 'sent']: a,
-                description: `${PLATFORM}: ${DESCRIBE[e.kind] || e.kind}`,
+                description: `${PLATFORM}: ${m.rent ? (m.dir === 'in' ? DESCRIBE.setup : DESCRIBE.closePayout) : DESCRIBE[e.kind] || e.kind}`,
             });
         }
     }

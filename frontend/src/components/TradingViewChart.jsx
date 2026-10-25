@@ -112,7 +112,7 @@ export default function TradingViewChart({ address, market, ammOnly = false, onT
         library_path: LIBRARY_PATH,
         datafeed,
         symbol: (shownRef.current = addressRef.current),
-        interval: '15',
+        interval: '60',
         locale: 'en',
         theme: themeRef.current,
         autosize: true,

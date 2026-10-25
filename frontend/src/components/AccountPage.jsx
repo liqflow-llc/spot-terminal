@@ -116,9 +116,18 @@ export default function AccountPage() {
   const { pref: themePref, setPref: setThemePref } = useTheme();
   const [tax, setTax] = useState(null); // { entries, years }
   const [taxYear, setTaxYear] = useState('');
+  // The summary includes what the chain shows; the first visit reads the wallet's history in the
+  // background, so poll until that's done.
   useEffect(() => {
     if (!wallet) return setTax(null);
-    getJSON(`/api/tax/summary?wallet=${wallet}`).then(setTax).catch(() => setTax(null));
+    let live = true, timer = null;
+    const load = () => getJSON(`/api/tax/summary?wallet=${wallet}`).then((r) => {
+      if (!live) return;
+      setTax(r);
+      if (r.scan && !r.scan.done) timer = setTimeout(load, 5000);
+    }).catch(() => live && setTax(null));
+    load();
+    return () => { live = false; clearTimeout(timer); };
   }, [wallet, payout]);
 
   return (
@@ -275,6 +284,8 @@ export default function AccountPage() {
             <div className="account-row">Connect your wallet to download your reports.</div>
           ) : !tax ? (
             <div className="account-row"><span className="spinner" /> Loading…</div>
+          ) : tax.entries === 0 && tax.scan && !tax.scan.done ? (
+            <div className="account-row"><span className="spinner" /> Reading your SpotTerminal activity from the blockchain ({tax.scan.scanned} transactions so far)…</div>
           ) : tax.entries === 0 ? (
             <div className="account-row">No SpotTerminal activity yet.</div>
           ) : (

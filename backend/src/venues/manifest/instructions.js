@@ -86,6 +86,13 @@ export function orderEconomics({ isBid, baseAtoms, mantissa, exponent }) {
 
 // ---------- instructions ----------
 
+// Every transaction SpotTerminal builds carries this memo, so a wallet's history on-chain shows
+// which transactions were SpotTerminal's (for the tax export). No accounts: nobody else must sign.
+export const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
+export const SPOTTERMINAL_MEMO = 'SpotTerminal';
+export const MEMO_CU = 2_000;
+export const memoIx = () => new TransactionInstruction({ programId: MEMO_PROGRAM_ID, keys: [], data: Buffer.from(SPOTTERMINAL_MEMO) });
+
 export function claimSeatIx({ trader, market }) {
     return createClaimSeatInstruction({ payer: new PublicKey(trader), market: new PublicKey(market) });
 }

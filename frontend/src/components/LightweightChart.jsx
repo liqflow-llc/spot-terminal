@@ -36,7 +36,7 @@ export default function LightweightChart({ address, market, ammOnly = false, onT
   const onTradeRef = useRef(onTrade);
   onTradeRef.current = onTrade;
   const { theme } = useTheme();
-  const [resolution, setResolution] = useState('15');
+  const [resolution, setResolution] = useState('60');
   const [chosen, setChosen] = useState(null);
   const [emptyManifest, setEmptyManifest] = useState(null); // market whose Manifest chart came back empty
   const [status, setStatus] = useState('loading'); // loading | ready | empty | error
@@ -134,7 +134,8 @@ export default function LightweightChart({ address, market, ammOnly = false, onT
             <button type="button" className={`lw-btn ${source === 'amm' ? 'active' : ''}`} onClick={() => setChosen('amm')} title="The price of this pair across every Solana DEX (Jupiter)">All DEXs</button>
           </>
         )}
-        <span className="lw-label muted">{label}</span>
+        {/* The source's detail ("every Solana pool (Jupiter)"); the Manifest button already says Manifest. */}
+        {label && label !== 'Manifest' && <span className="lw-label muted">{label.replace(/^All DEXs · /, '')}</span>}
       </div>
       <div ref={boxRef} className="lw-chart" />
       {status !== 'ready' && (

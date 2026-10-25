@@ -29,7 +29,7 @@ const { OrderStore } = await import('../src/orders/orderStore.js');
 const { OrderService } = await import('../src/orders/orderService.js');
 const { Keeper, loadKeeperKeypair } = await import('../src/orders/keeper.js');
 const { Ledger } = await import('../src/orders/ledger.js');
-const { ChainHistory, deriveHistory } = await import('../src/history/chainHistory.js');
+const { ChainHistory, deriveHistory, deriveTaxEntries } = await import('../src/history/chainHistory.js');
 
 const NATIVE = spl.NATIVE_MINT;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -466,7 +466,7 @@ await test('History rebuilt from the chain matches every order the server record
     const history = new ChainHistory();
     await history.scan(wallet);
     for (const m of [mBQ, mBS]) await markets.refresh(m);
-    const d = deriveHistory(history.state(wallet).items, { markets, decimals: () => 6, symbol: m => m.slice(0, 4) });
+    const d = deriveHistory(history.state(wallet).items, { markets, wallet, fills: history.state(wallet).fills, decimals: () => 6, symbol: m => m.slice(0, 4) });
     const byKey = new Map(d.orders.map(o => [`${o.market}:${o.sequenceNumber}`, o]));
     const recorded = store.forWallet(wallet).filter(o => o.sequenceNumber && o.placeSignature);
     log('recorded orders', recorded.length, '| from the chain', d.orders.length, '| statuses', JSON.stringify(d.orders.reduce((c, o) => ({ ...c, [o.status]: (c[o.status] || 0) + 1 }), {})));
@@ -481,18 +481,16 @@ await test('History rebuilt from the chain matches every order the server record
                 : o.status === 'expired' ? ['expired'] : [o.status];
         assert.ok(expected.includes(c.status), `order ${o.id.slice(0, 8)}: recorded ${o.status}, chain says ${c.status}`);
         if (c.status === 'filled') assert.equal(c.filled, c.size);
+        const recordedFill = Number(o.filledAtoms || 0) / 10 ** o.baseDecimals;
+        if (c.filled !== recordedFill) log(`  fill differs: ${o.side} ${o.price} x${c.size} (${o.market.slice(0, 4)} #${o.sequenceNumber}) recorded ${recordedFill} ${o.status}, chain ${c.filled} ${c.status}`);
     }
     // Payout accounts: what the wallet set up and didn't close is what the store holds.
     assert.deepEqual([...d.payoutAccounts].sort(), [...store.noncesFor(wallet)].sort(), 'payout accounts match');
 });
 
-await test('Tax ledger reconciles with the chain: deposits − withdrawals ± fills = what SpotTerminal holds, per token', async () => {
+/** Deposits − withdrawals ± fills, per token, against what SpotTerminal holds for the wallet now. */
+async function reconcile(entries, label) {
     const wallet = maker.publicKey.toBase58();
-    const entries = ledger.forWallet(wallet);
-    const kinds = {};
-    for (const e of entries) kinds[e.kind] = (kinds[e.kind] || 0) + 1;
-    log('ledger entries by kind:', JSON.stringify(kinds));
-    for (const k of ['setup', 'place', 'fill', 'claim', 'cancel', 'edit', 'cancelAll', 'closePayout', 'closeAccount']) assert.ok(kinds[k], `recorded ${k}`);
     const net = new Map(), fillsPerMint = new Map();
     const add = (map, mint, v) => map.set(mint, (map.get(mint) || 0n) + v);
     for (const e of entries) {
@@ -518,9 +516,32 @@ await test('Tax ledger reconciles with the chain: deposits − withdrawals ± fi
     for (const mint of new Set([...net.keys(), ...held.keys()])) {
         const diff = (net.get(mint) || 0n) - (held.get(mint) || 0n);
         const tolerance = fillsPerMint.get(mint) || 0n; // the program may round each match by an atom
-        log(`${mint.slice(0, 6)}: ledger ${net.get(mint) || 0n}, held ${held.get(mint) || 0n}, diff ${diff}`);
+        log(`${label} ${mint.slice(0, 6)}: entries ${net.get(mint) || 0n}, held ${held.get(mint) || 0n}, diff ${diff}`);
         assert.ok(diff >= -tolerance && diff <= tolerance, `${mint} reconciles within ${tolerance} atoms (diff ${diff})`);
     }
+}
+
+await test('Tax ledger reconciles with the chain: deposits − withdrawals ± fills = what SpotTerminal holds, per token', async () => {
+    const wallet = maker.publicKey.toBase58();
+    const entries = ledger.forWallet(wallet);
+    const kinds = {};
+    for (const e of entries) kinds[e.kind] = (kinds[e.kind] || 0) + 1;
+    log('ledger entries by kind:', JSON.stringify(kinds));
+    for (const k of ['setup', 'place', 'fill', 'claim', 'cancel', 'edit', 'cancelAll', 'closePayout', 'closeAccount']) assert.ok(kinds[k], `recorded ${k}`);
+    await reconcile(entries, 'server ledger');
+});
+
+await test('Tax entries rebuilt from the chain alone reconcile the same way', async () => {
+    const wallet = maker.publicKey.toBase58();
+    const history = new ChainHistory();
+    await history.scan(wallet);
+    const entries = deriveTaxEntries(history.state(wallet).items, { wallet, markets, fills: history.state(wallet).fills });
+    const kinds = {};
+    for (const e of entries) kinds[e.kind] = (kinds[e.kind] || 0) + 1;
+    log('from the chain, by kind:', JSON.stringify(kinds));
+    for (const k of ['setup', 'place', 'fill', 'claim', 'cancel', 'edit', 'closePayout']) assert.ok(kinds[k], `found ${k}`); // closing the account is cancels, then a closePayout
+    assert.ok(entries.filter(e => e.moves.some(m => m.rent)).length >= 2, 'payout-account rent in and out');
+    await reconcile(entries, 'chain');
 });
 
 await sleep(1000);

@@ -22,7 +22,7 @@ import { errorDetail, log, short, takeProblemCounts } from './log.js';
 import { takeRpcStats } from './rpcStats.js';
 import { startLogRotation } from './logRotate.js';
 import { Notifier } from './notify.js';
-import { ChainHistory, deriveHistory } from './history/chainHistory.js';
+import { ChainHistory, deriveHistory, deriveTaxEntries } from './history/chainHistory.js';
 import { getIpfsIcon } from './tokens/ipfsIcons.js';
 
 const registry = new TokenRegistry({ heliusRpc: config.rpcUrl, jupApiKey: config.jupApiKey });
@@ -731,7 +731,7 @@ app.get('/api/history', rateLimit('account', 40, 60_000), async (req, res) => {
         const h = chainHistory.get(walletPk.toBase58());
         await registry.ensure(h.items.flatMap(i => (i.swap ? [i.swap.inMint, i.swap.outMint] : [])));
         const display = (m) => registry.display(m);
-        const d = deriveHistory(h.items, { markets, decimals: m => display(m).decimals, symbol: m => display(m).symbol });
+        const d = deriveHistory(h.items, { markets, wallet: walletPk.toBase58(), fills: h.fills, decimals: m => display(m).decimals, symbol: m => display(m).symbol });
         res.set('Cache-Control', 'no-cache');
         res.json({
             orders: d.orders,
@@ -944,12 +944,28 @@ const taxWallet = (req, res) => {
         return null;
     }
 };
+// The wallet's SpotTerminal activity for the tax export: what this server recorded (exact fill
+// times), plus what the chain shows SpotTerminal did that it has no record of (placed through
+// another SpotTerminal server, or with this one's data lost): history/chainHistory.js.
+function taxEntries(wallet) {
+    const recorded = ledger.forWallet(wallet).filter(e => !e.external);
+    const sigs = new Set(recorded.map(e => e.sig).filter(Boolean));
+    const recordedOrders = new Set(recorded.filter(e => e.trade && e.orderId).map((e) => {
+        const o = orderStore.get(e.orderId);
+        return o?.sequenceNumber ? `${o.market}:${o.sequenceNumber}` : null;
+    }).filter(Boolean));
+    const h = chainHistory.get(wallet);
+    const fromChain = deriveTaxEntries(h.items, { wallet, markets, fills: h.fills })
+        .filter(e => (e.trade ? !recordedOrders.has(e.orderId) : !sigs.has(e.sig)));
+    return { entries: [...recorded, ...fromChain].sort((a, b) => a.at - b.at), scan: { scanning: h.scanning, done: h.done, scanned: h.scanned, sinceDays: h.sinceDays } };
+}
+
 app.get('/api/tax/summary', rateLimit('tax', 30, 60_000), (req, res) => {
     const wallet = taxWallet(req, res);
     if (!wallet) return;
-    const entries = ledger.forWallet(wallet).filter(e => !e.external);
+    const { entries, scan } = taxEntries(wallet);
     res.set('Cache-Control', 'no-cache');
-    res.json({ apps: TAX_APPS, entries: entries.length, years: [...new Set(entries.map(e => new Date(e.at).getUTCFullYear()))].sort((a, b) => b - a) });
+    res.json({ apps: TAX_APPS, entries: entries.length, years: [...new Set(entries.map(e => new Date(e.at).getUTCFullYear()))].sort((a, b) => b - a), scan });
 });
 app.get('/api/tax/export', rateLimit('tax', 30, 60_000), (req, res) => {
     const wallet = taxWallet(req, res);
@@ -959,7 +975,7 @@ app.get('/api/tax/export', rateLimit('tax', 30, 60_000), (req, res) => {
     const year = req.query.year ? Number(req.query.year) : null;
     if (year != null && !(Number.isInteger(year) && year >= 2020 && year <= 2100)) return res.status(400).json({ error: 'Invalid year' });
     try {
-        const rows = buildRows(ledger.forWallet(wallet), (mint) => registry.display(mint), { year });
+        const rows = buildRows(taxEntries(wallet).entries, (mint) => registry.display(mint), { year });
         log.info('tax', 'export', { wallet: short(wallet), app: taxApp, year: year || 'all', rows: rows.length });
         res.set('Content-Type', 'text/csv; charset=utf-8');
         res.set('Content-Disposition', `attachment; filename="spotterminal-${taxApp}-${year || 'all-time'}.csv"`);

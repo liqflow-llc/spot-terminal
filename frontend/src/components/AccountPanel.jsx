@@ -25,8 +25,14 @@ const STATUS = {
   replacing: 'Updating',
   filled: 'Filled',
 };
-// Trades from the wallet's history that weren't resting orders.
-const TRADE_STATUS = { jupiter: 'Swap · Jupiter', manifest: 'Market · Manifest' };
+// Trades from the wallet's history that weren't resting orders: a Jupiter swap names the DEXs it
+// went through (Manifest included), a Manifest market order its venue.
+const tradeLabel = (t) => {
+  if (t.venue !== 'jupiter') return 'Market · Manifest';
+  const dexes = t.dexes || [];
+  return `Swap · Jupiter${dexes.length ? ` (${dexes.slice(0, 2).join(', ')}${dexes.length > 2 ? ` +${dexes.length - 2}` : ''})` : ''}`;
+};
+const placedThrough = (o) => (o.app ? `Placed through ${o.app}.` : '');
 const HISTORY_POLL_MS = 5000;
 
 // An open order filled all but a sliver: its pre-signed payout is for the full amount, so it waits
@@ -185,11 +191,11 @@ function OrdersTable({ orders, market, onCancel, onEdit, busy, empty }) {
               <td className="r num">{filled == null ? '—' : `${Math.max(0, Math.min(100, filled * 100)).toFixed(1)}%`}</td>
               <td>
                 {o.status === 'trade'
-                  ? <span className="status claimed" title="A trade your wallet made, read from the blockchain.">{TRADE_STATUS[o.venue] || 'Trade'}</span>
+                  ? <span className="status claimed" title={[o.venue === 'jupiter' && o.dexes?.length ? `Routed through ${o.dexes.join(', ')}.` : '', placedThrough(o)].filter(Boolean).join(' ')}>{tradeLabel(o)}</span>
                   : o.source === 'chain'
-                  ? <span className={`status ${o.status}`} title={OPEN.has(o.status)
-                    ? 'Found on the blockchain: placed through another SpotTerminal or app, so this site has no record of it. You can cancel it here; it has no automatic payout, so collect any fill from the Account page.'
-                    : 'Read from the blockchain (placed through another SpotTerminal or app). How much of a cancelled order filled is only known when the cancel also withdrew its proceeds.'}>{STATUS[o.status] || o.status} · on-chain</span>
+                  ? <span className={`status ${o.status}`} title={[placedThrough(o), OPEN.has(o.status)
+                    ? 'This site has no record of it (placed through another app or SpotTerminal server). You can cancel it here; it has no automatic payout, so collect any fill from the Account page.'
+                    : o.status === 'cancelled' && o.filled == null ? 'How much filled before the cancel isn\'t in your wallet\'s transactions (fills happen in the taker\'s).' : ''].filter(Boolean).join(' ')}>{STATUS[o.status] || o.status} · Manifest</span>
                   : isDustLeft(o)
                   ? <span className="status claiming" title={`Filled except ${formatAmount(o.remaining)}, too little for anyone to take, so the automatic payout can't run. Collect moves everything to your wallet.`}>Filled · collect</span>
                   : o.status === 'claimed' && o.remainderOnBook
