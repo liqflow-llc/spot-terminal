@@ -203,11 +203,19 @@ export function parseTransaction(tx, wallet) {
 // ---------- scanning and caching ----------
 
 let lastFetch = 0;
+/** Run an RPC call in turn with all other history calls; on a 429, back off and try again. */
 async function paced(fn) {
-    const wait = lastFetch + FETCH_GAP_MS - Date.now();
-    lastFetch = Math.max(Date.now(), lastFetch + FETCH_GAP_MS);
-    if (wait > 0) await sleep(wait);
-    return fn();
+    for (let attempt = 0; ; attempt++) {
+        const wait = lastFetch + FETCH_GAP_MS - Date.now();
+        lastFetch = Math.max(Date.now(), lastFetch + FETCH_GAP_MS);
+        if (wait > 0) await sleep(wait);
+        try {
+            return await fn();
+        } catch (err) {
+            if (!/429|Too Many Requests/i.test(err.message) || attempt >= 4) throw err;
+            lastFetch = Date.now() + 2000 * 2 ** attempt; // 2s, 4s, 8s, 16s: everyone waits
+        }
+    }
 }
 
 export class ChainHistory {
