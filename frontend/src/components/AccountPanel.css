@@ -1,0 +1,22 @@
+.ap-body { flex: 1; min-height: 0; overflow: auto; }
+.ap-empty { display: flex; align-items: center; justify-content: center; gap: 10px; height: 100%; min-height: 120px; }
+.ap-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ap-table th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 500; text-align: left; padding: 6px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.ap-table td { padding: 6px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.ap-table .r { text-align: right; }
+.ap-table tr.other-market td { opacity: .7; }
+.status { font-weight: 500; }
+.status.claimed { color: var(--bid); }
+.status.claiming, .status.placing { color: var(--accent); }
+.status.failed, .status.claim_failed { color: var(--ask); }
+.status.cancelled, .status.closed { color: var(--muted); }
+.tx-link { margin-left: 6px; }
+.ap-balances { display: flex; flex-direction: column; }
+.ap-withdraw { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; font-size: 12px; }
+.status.expired { color: var(--warn); }
+.status.replacing { color: var(--accent); }
+.ap-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.ap-actions .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.edit-order { display: flex; flex-direction: column; gap: 10px; min-width: min(360px, 80vw); }
+.edit-order .small { font-size: 12px; margin: 0; }
+.ap-title-actions { display: flex; gap: 6px; align-items: center; }

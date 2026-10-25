@@ -1,0 +1,7 @@
+.tr-head, .tr-row { display: grid; grid-template-columns: 1.1fr 1fr 0.8fr; gap: 6px; padding: 0 12px; }
+.tr-head { color: var(--muted); font-size: 11px; height: 26px; align-items: center; flex-shrink: 0; }
+.tr-head span:not(:first-child), .tr-row span:not(:first-child) { text-align: right; }
+.tr-body { flex: 1; min-height: 0; overflow-y: auto; }
+.tr-row { height: 20px; align-items: center; font-size: 12px; color: var(--text); }
+.tr-row:hover { background: var(--panel-2); text-decoration: none; }
+.tr-empty { padding: 16px 12px; font-size: 12px; }

@@ -1,0 +1,41 @@
+.account-page { overflow-y: auto; }
+.account-main { width: 100%; max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; box-sizing: border-box; }
+.account-main h1 { font-size: 20px; margin: 0 0 16px; }
+.account-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+.account-card + .account-card { margin-top: 16px; }
+.account-card h2 { font-size: 15px; margin: 0; }
+.account-card p { margin: 0; }
+.account-card .small { font-size: 12px; }
+.account-row { display: flex; align-items: center; gap: 10px; color: var(--text-2); }
+.account-row.error { color: var(--ask); }
+.account-connect { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; color: var(--text-2); }
+.account-connect .wallet-adapter-button { height: 34px; font: 600 13px var(--font); border-radius: var(--radius); background: var(--accent); line-height: 34px; }
+.account-stats { display: flex; gap: 32px; margin: 0; flex-wrap: wrap; }
+.account-stats dt { color: var(--muted); font-size: 12px; }
+.account-stats dd { margin: 2px 0 0; font-size: 18px; font-weight: 600; }
+.account-card .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.account-legal { margin-top: 16px; }
+.segmented { display: inline-flex; padding: 3px; gap: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
+.segmented button { min-width: 72px; height: 30px; padding: 0 12px; border: 0; border-radius: 4px; background: none; color: var(--text-2); cursor: pointer; font-weight: 500; }
+.segmented button:hover { color: var(--text); }
+.segmented button.active { background: var(--accent-bg); color: var(--accent); font-weight: 600; }
+.segmented button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.account-card .btn.danger { background: var(--ask); border-color: var(--ask); color: #fff; }
+.account-card .btn.danger:not(:disabled):hover { filter: brightness(1.08); }
+.account-card .btn.danger:disabled { opacity: 0.6; }
+.account-warning { color: var(--ask); font-weight: 500; }
+.tax-year { gap: 10px; }
+.tax-year select { height: 30px; padding: 0 8px; background: var(--bg); color: var(--text); border: 1px solid var(--border-2); border-radius: var(--radius); }
+.tax-apps { display: flex; flex-wrap: wrap; gap: 8px; }
+.tax-apps .btn { text-decoration: none; }
+.tax-howto { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+.tax-howto summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
+.tax-howto p { margin: 4px 0 8px 14px; font-size: 13px; color: var(--text-2); }
+.account-card h3 { font-size: 13px; margin: 6px 0 0; }
+.funds-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.funds-table th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 0 0 6px; }
+.funds-table td { padding: 8px 0; border-top: 1px solid var(--border); vertical-align: middle; }
+.funds-table .r { text-align: right; }
+.funds-table td + td { padding-left: 12px; }
+.payout-list { list-style: none; margin: 0; padding: 0; width: 100%; font-size: 13px; }
+.payout-list li { display: flex; gap: 16px; padding: 4px 0; flex-wrap: wrap; }

@@ -1,0 +1,14 @@
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 900; padding: 16px; }
+.modal { width: 440px; max-width: 100%; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 10px; padding: 18px; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+.modal-title { font-size: 16px; font-weight: 700; margin-bottom: 10px; }
+.modal-body { color: var(--text-2); line-height: 1.55; }
+.modal-body p { margin: 0 0 10px; }
+.modal-body ul { margin: 0 0 10px; padding-left: 18px; }
+.modal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.modal-actions .btn { white-space: nowrap; }
+.modal-actions .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.modal.danger { border-color: var(--ask); }
+.modal.danger .modal-title { color: var(--ask); }
+.modal-actions .danger { background: var(--ask); border-color: var(--ask); color: #fff; }
+.danger-text { color: var(--ask); }

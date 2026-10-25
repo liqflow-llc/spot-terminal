@@ -1,0 +1,15 @@
+node_modules/
+.env
+data/
+logs/
+dist/
+dist-test/
+# Licensed TradingView bundle: copied in by scripts/setup-charting-library.sh, never committed
+frontend/public/charting_library/
+.DS_Store
+# This host's settings (see ecosystem.config.js and scripts/deploy.sh)
+ecosystem.local.js
+scripts/deploy.local.sh
+# Working notes and this host's old-domain nginx config
+TODO.txt
+deploy/nginx-juporderbook.com

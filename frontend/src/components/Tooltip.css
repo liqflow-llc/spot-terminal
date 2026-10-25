@@ -1,0 +1,10 @@
+.tip-anchor { cursor: help; outline: none; }
+.tip-underline { text-decoration: underline dotted; text-underline-offset: 2px; }
+.tip-anchor:focus-visible { box-shadow: 0 0 0 2px var(--accent); border-radius: 2px; }
+.tip {
+  position: fixed; z-index: 1000; width: max-content; max-width: 260px; transform: translate(-50%, -100%);
+  padding: 7px 9px; border-radius: var(--radius); background: var(--panel-3); border: 1px solid var(--border-2);
+  color: var(--text); font: 400 12px/1.4 var(--font); text-align: left; white-space: normal;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35); pointer-events: none;
+}
+.tip.below { transform: translate(-50%, 0); }

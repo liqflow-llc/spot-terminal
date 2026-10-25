@@ -1,0 +1,12 @@
+.tv-wrap { flex: 1; min-height: 0; position: relative; }
+.tv-container { position: absolute; inset: 0; }
+.tv-error { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); }
+.lw-wrap { position: absolute; inset: 0; display: flex; flex-direction: column; }
+.lw-toolbar { display: flex; align-items: center; gap: 2px; height: 34px; padding: 0 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; overflow-x: auto; white-space: nowrap; }
+.lw-btn { height: 26px; padding: 0 8px; border: 0; border-radius: 4px; background: none; color: var(--text-2); font: inherit; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; }
+.lw-btn:hover { color: var(--text); }
+.lw-btn.active { color: var(--accent); font-weight: 600; }
+.lw-sep { width: 1px; height: 16px; margin: 0 6px; background: var(--border-2); }
+.lw-label { margin-left: 8px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.lw-chart { flex: 1; min-height: 0; position: relative; }
+.lw-status { position: absolute; inset: 34px 0 0 0; z-index: 3; display: flex; align-items: center; justify-content: center; pointer-events: none; }

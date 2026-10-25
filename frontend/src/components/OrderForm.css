@@ -1,0 +1,54 @@
+.order-form { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.of-loading { display: flex; align-items: center; justify-content: center; height: 200px; }
+.of-sides { display: grid; grid-template-columns: 1fr 1fr; background: var(--panel-2); border-radius: var(--radius); padding: 3px; }
+.of-side { height: 32px; border: 0; border-radius: 4px; background: none; font-weight: 700; color: var(--muted); cursor: pointer; }
+.of-side.buy.active { background: var(--bid); color: #fff; }
+.of-side.sell.active { background: var(--ask); color: #fff; }
+.of-type { display: flex; align-items: center; justify-content: space-between; }
+.of-type-tabs { display: flex; gap: 14px; }
+.of-type-tab { background: none; border: 0; padding: 0 0 2px; font-weight: 600; color: var(--muted); border-bottom: 2px solid transparent; cursor: pointer; }
+.of-type-tab:hover { color: var(--text-2); }
+.of-type-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.of-slippage { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.of-slippage-options { display: grid; grid-template-columns: 44px 44px 72px; gap: 4px; }
+.of-slippage-custom { display: flex; align-items: center; height: 24px; padding: 0 6px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 4px; font-size: 11px; color: var(--text-2); }
+.of-slippage-custom.active, .of-slippage-custom:focus-within { border-color: var(--accent); color: var(--text); }
+.of-slippage-custom input { width: 100%; min-width: 0; background: none; border: 0; outline: none; font-size: 11px; text-align: right; padding-right: 2px; }
+.of-pct.active { border-color: var(--accent); color: var(--text); }
+.warn-text { color: var(--warn); }
+.of-check { display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 12px; cursor: pointer; }
+.of-check input { accent-color: var(--accent); }
+.of-avail { display: flex; justify-content: space-between; font-size: 12px; }
+.of-field { display: flex; align-items: center; height: 40px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: var(--radius); padding: 0 10px; gap: 8px; }
+.of-field:focus-within { border-color: var(--accent); }
+.of-field-label { color: var(--muted); font-size: 12px; width: 48px; flex-shrink: 0; }
+.of-field input { flex: 1; min-width: 0; background: none; border: 0; outline: none; text-align: right; font-size: 14px; }
+.of-field-unit { color: var(--text-2); font-size: 12px; font-weight: 600; max-width: 70px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.of-percents { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.of-pct { height: 24px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 4px; font-size: 11px; color: var(--text-2); cursor: pointer; }
+.of-pct:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.of-pct:disabled { opacity: .4; cursor: default; }
+.of-note { font-size: 12px; padding: 6px 8px; border-radius: 4px; background: var(--panel-2); }
+.of-note.warn { color: var(--warn); }
+.of-note.danger { color: var(--text); background: var(--ask-bg); border: 1px solid var(--ask); line-height: 1.45; }
+.of-submit { height: 42px; border: 0; border-radius: var(--radius); font-weight: 700; font-size: 14px; color: #fff; cursor: pointer; }
+.of-submit.buy { background: var(--bid); }
+.of-submit.sell { background: var(--ask); }
+.of-submit:disabled { opacity: .55; cursor: not-allowed; }
+.of-summary { margin: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.of-summary div { display: flex; justify-content: space-between; gap: 8px; }
+.of-summary dt { color: var(--muted); }
+.of-summary dd { margin: 0; text-align: right; }
+.risk-note ul { margin: 4px 0 0; padding-left: 16px; }
+.risk-note li { margin: 2px 0; }
+.of-expiry { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.of-expiry select { height: 26px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 4px; color: var(--text); font-size: 12px; padding: 0 6px; }
+@media (max-width: 760px) { .of-loading { height: 600px; } } /* the form's real height on phones, so nothing below jumps */
+.of-choices { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; line-height: 1.45; }
+
+/* Limit tab on a pair with no Manifest market: the form greyed out under a notice. */
+.of-limit-wrap { position: relative; }
+.of-limit { display: flex; flex-direction: column; gap: 10px; }
+.of-limit.blocked { opacity: 0.3; filter: grayscale(1); pointer-events: none; user-select: none; }
+.of-limit-overlay { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: center; padding-top: 48px; }
+.of-limit-overlay .no-market-notice { background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 10px; padding: 16px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); max-width: 260px; }

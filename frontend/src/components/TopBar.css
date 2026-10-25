@@ -1,0 +1,25 @@
+.topbar { display: flex; align-items: center; gap: 24px; height: 52px; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.brand { font-weight: 700; font-size: 17px; color: var(--text); letter-spacing: -0.02em; }
+.brand:hover { text-decoration: none; }
+.brand span { color: var(--accent); }
+.topnav { display: flex; gap: 16px; }
+.topnav-item { color: var(--muted); font-weight: 600; }
+.topnav-item:hover { color: var(--text-2); text-decoration: none; }
+.topnav-item.active { color: var(--text); }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.topbar .wallet-adapter-button { height: 34px; padding: 0 14px; font: 600 13px var(--font); border-radius: var(--radius); background: var(--accent); line-height: 34px; white-space: nowrap; }
+.topbar .wallet-adapter-button:not([disabled]):hover { background: var(--accent-hover); }
+.topbar .wallet-adapter-button-start-icon { width: 18px; height: 18px; margin-right: 8px; }
+
+/* Phones: keep everything on one line (the wallet button used to wrap onto two). */
+@media (max-width: 760px) {
+  .topbar { gap: 14px; padding: 0 12px; }
+  .brand { font-size: 16px; }
+  .topnav { gap: 12px; }
+  .topbar .wallet-adapter-button { height: 32px; padding: 0 10px; font-size: 12px; line-height: 32px; }
+  .topbar .wallet-adapter-button-start-icon { width: 16px; height: 16px; margin-right: 6px; }
+}
+@media (max-width: 360px) {
+  .topbar { gap: 10px; }
+  .topnav { gap: 10px; font-size: 12px; }
+}

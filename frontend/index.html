@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0e11" />
+    <script>
+      // Colour theme before first paint (see src/theme.js).
+      try {
+        var t = localStorage.getItem('spot.theme');
+        if (t !== 'light' && t !== 'dark') t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        document.documentElement.dataset.theme = t;
+        if (t === 'light') document.querySelector('meta[name="theme-color"]').setAttribute('content', '#f5f7fa');
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <title>SpotTerminal · Solana order books</title>
+    <!-- Wallets (Backpack) name the site after the tab title as their script starts: show just
+         the brand until then (src/pageTitle.js). The server-rendered <title> stays for crawlers. -->
+    <script>document.title = 'SpotTerminal';</script>
+    <meta name="description" content="Trade Solana tokens on on-chain order books with zero trading fees. Limit orders pay out to your wallet automatically when they fill." />
+    <script defer data-domain="spotterminal.com" src="https://plausible.io/js/script.js"></script>
+    <!-- The chart library is big and only requested once the app runs: start fetching it now. -->
+    <link rel="preload" href="/charting_library/charting_library.standalone.js" as="script" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
