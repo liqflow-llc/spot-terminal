@@ -127,7 +127,7 @@ Solflare, Backpack, ...) to trade.
 ```bash
 git clone https://github.com/liqflow-llc/spot-terminal.git
 cd spot-terminal
-cp .env.example .env    # optional: paste a free Helius key into it (see below)
+cp .env.example .env    # optional: every setting has a working default
 ```
 
 Start the API (keep this terminal open):
@@ -148,10 +148,12 @@ npm run dev             # open http://localhost:5180
 
 That's it. Notes:
 
-- **RPC.** With an empty `.env` the backend uses Solana's public RPC, which works but rate-limits.
-  A free [Helius](https://dashboard.helius.dev) key (`HELIUS_API_KEY`) is faster and adds token
-  metadata for unverified tokens; any other provider works through `RPC_URL` / `WS_URL`. Every
-  setting is described in [`.env.example`](.env.example).
+- **RPC.** No key needed: with an empty `.env` the backend uses a shared free-plan
+  [Helius](https://helius.dev) key that ships with the project. Everyone running the app without
+  their own key shares its monthly credits, so if it runs out (or is rotated), put your own free
+  key from [dashboard.helius.dev](https://dashboard.helius.dev) in `.env` as `HELIUS_API_KEY`. Any
+  other provider works through `RPC_URL` / `WS_URL`. Every setting is described in
+  [`.env.example`](.env.example).
 - **It trades on mainnet with real funds.** Orders you place locally are real Manifest orders.
 - **Automatic payouts.** On first start the backend creates a keeper keypair at `data/keeper.json`
   and logs its address. Send it a little SOL (each payout costs ~0.00001 SOL in fees). Without SOL

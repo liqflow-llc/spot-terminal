@@ -5,14 +5,17 @@ import dotenv from 'dotenv';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 dotenv.config({ path: path.join(root, '.env') });
 
-// RPC: a Helius key (free plan is plenty), else RPC_URL/WS_URL, else Solana's public RPC, which
-// works for trying the app locally but rate-limits and has no Helius extras (token metadata for
-// unverified tokens, faster incremental market scans).
-const heliusKey = process.env.HELIUS_API_KEY;
-const PUBLIC_RPC = 'https://api.mainnet-beta.solana.com';
-if (!heliusKey && !process.env.RPC_URL) {
-    console.warn(`No HELIUS_API_KEY or RPC_URL in .env: using the public RPC (${PUBLIC_RPC}), which rate-limits.`);
+// RPC: HELIUS_API_KEY, else RPC_URL/WS_URL, else the shared Helius key below. The shared key is a
+// free-plan key the project publishes so anyone can run the app locally without signing up for
+// anything; it is shared by everyone running it, so it can hit its monthly limit (and may be
+// rotated or removed). For anything beyond trying it out, put your own free key in .env
+// (https://dashboard.helius.dev).
+const SHARED_HELIUS_KEY = 'e1607f59-37d4-4b4a-80f1-7f02899a5f90';
+const heliusKey = process.env.HELIUS_API_KEY || (process.env.RPC_URL ? '' : SHARED_HELIUS_KEY);
+if (!process.env.HELIUS_API_KEY && !process.env.RPC_URL) {
+    console.warn('No HELIUS_API_KEY or RPC_URL in .env: using the shared Helius key (fine for trying it out; get your own free key at https://dashboard.helius.dev).');
 }
+const PUBLIC_RPC = 'https://api.mainnet-beta.solana.com';
 const defaultRpc = (scheme) => (heliusKey ? `${scheme}://mainnet.helius-rpc.com/?api-key=${heliusKey}` : PUBLIC_RPC.replace('https', scheme));
 
 export const config = {
