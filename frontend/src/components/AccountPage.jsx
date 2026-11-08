@@ -139,11 +139,9 @@ export default function AccountPage() {
         <h1>Account</h1>
 
         <section className="account-card">
-          <h2>Your funds on SpotTerminal</h2>
+          <h2>Partially filled orders</h2>
           <p className="muted">
-            When an order fills, Manifest credits what you bought (or the proceeds of a sale) to your balance
-            inside that market, and the payout moves it to your wallet. Anything still waiting is listed here;
-            only your wallet can withdraw it.
+            Filled orders pay out to your wallet automatically. What a partly filled order has bought or sold so far waits here.
           </p>
           {!wallet ? (
             <div className="account-connect">
@@ -153,7 +151,7 @@ export default function AccountPage() {
           ) : !funds ? (
             <div className="account-row"><span className="spinner" /> Loading…</div>
           ) : funds.length === 0 ? (
-            <div className="account-row">Nothing waiting in any market.</div>
+            <div className="account-row">None right now.</div>
           ) : (
             <table className="funds-table">
               <thead><tr><th>Market</th><th className="r">Waiting</th><th /></tr></thead>
@@ -186,8 +184,7 @@ export default function AccountPage() {
           )}
           {funds?.some(m => m.collectOrderId) && (
             <p className="muted small">
-              Collect cancels what&apos;s left of a filled order (a remainder worth under $5, already paid out, or a
-              sliver too small for its automatic payout) and moves everything in that market to your wallet.
+              Collect cancels a leftover too small to fill (under $5) and moves everything to your wallet.
             </p>
           )}
 
