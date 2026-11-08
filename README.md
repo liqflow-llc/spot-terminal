@@ -117,7 +117,7 @@ As of October 4, 2026:
 - `frontend/` React + Vite; charts by TradingView Advanced Charts when its licensed bundle is
   installed, Lightweight Charts otherwise
 - `deploy/` example nginx config
-- `scripts/` charting-library setup and the deploy script
+- `scripts/` the one-command runner behind `npm start`, charting-library setup, the deploy script
 
 ## Run it locally
 
@@ -127,23 +127,13 @@ Solflare, Backpack, ...) to trade.
 ```bash
 git clone https://github.com/liqflow-llc/spot-terminal.git
 cd spot-terminal
+npm start
 ```
 
-Start the API (keep this terminal open):
-
-```bash
-cd backend
-npm install
-npm start               # API on http://127.0.0.1:3020
-```
-
-Start the app in a second terminal:
-
-```bash
-cd frontend
-npm install
-npm run dev             # open http://localhost:5180
-```
+Then open http://localhost:5180. The first run installs the packages (a minute or two); after
+that it starts in seconds. `npm start` runs the API (port 3020) and the app (port 5180) together
+in one terminal; Ctrl+C stops both. To run them separately instead: `npm start` in `backend/`,
+and `npm run dev` in `frontend/` (each after `npm install`).
 
 That's it. Notes:
 

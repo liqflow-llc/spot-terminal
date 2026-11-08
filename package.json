@@ -1,0 +1,12 @@
+{
+  "name": "spot-terminal",
+  "private": true,
+  "description": "Open-source trading terminal for Solana: limit orders on Manifest order books for any token.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node scripts/run.mjs"
+  }
+}
