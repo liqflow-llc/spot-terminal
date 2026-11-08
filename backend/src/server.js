@@ -124,6 +124,7 @@ const orders = new OrderService({
     markets, store: orderStore, keeperPubkey: keeperKeypair.publicKey, referencePrice, ledger, resolveMarket,
     jupiter: (path, init) => registry.jupFetch(path, init),
     usdPrices: (mints) => registry.getPrices(mints),
+    chainAccount: (walletPk) => chainAccount(walletPk),
 });
 const keeper = new Keeper({ markets, store: orderStore, keypair: keeperKeypair, ledger });
 orders.onPlaced = (id) => keeper.track(id);
@@ -720,6 +721,20 @@ async function livePayoutAccounts(walletPk, addresses) {
     return accounts;
 }
 
+// Payout accounts and open orders of a wallet that only the chain knows about, for the Account
+// page's close button (orders/orderService.js). The payout accounts come from the history scan,
+// so they can show up a little after the first visit (`scan.done`).
+async function chainAccount(walletPk) {
+    const wallet = walletPk.toBase58();
+    const h = chainHistory.get(wallet);
+    const d = deriveHistory(h.items, { markets, wallet, fills: h.fills, decimals: m => registry.display(m).decimals, symbol: m => registry.display(m).symbol });
+    return {
+        nonces: d.payoutAccounts,
+        orders: chainOnlyOrders(walletPk, orderStore.forWallet(wallet)),
+        scan: { scanning: h.scanning, done: h.done },
+    };
+}
+
 app.get('/api/history', rateLimit('account', 40, 60_000), async (req, res) => {
     let walletPk;
     try {
@@ -1054,6 +1069,7 @@ app.get('/api/payout-accounts', rateLimit('account', 40, 60_000), async (req, re
 // One line to read when checking on the site: data freshness, load, RPC credit use, the payout
 // wallet's SOL, and how many warnings/errors each area logged since the last line.
 const HEALTH_MS = 15 * 60 * 1000;
+let keeperUnfundedNoted = false;
 const logHealth = async () => {
     try {
         let viewers = 0, watchers = 0;
@@ -1073,7 +1089,14 @@ const logHealth = async () => {
             rssMb: Math.round(process.memoryUsage().rss / 1e6),
             problems: takeProblemCounts(),
         });
-        if (lamports != null && lamports < 0.05e9) log.error('keeper', 'LOW_BALANCE', { sol: (lamports / 1e9).toFixed(4), feePayer: keeperKeypair.publicKey.toBase58() });
+        // An unfunded keeper is a choice (a local install, say): payouts are then collected by hand.
+        // Running low after being funded is what needs attention.
+        if (lamports === 0) {
+            if (!keeperUnfundedNoted) log.info('keeper', 'unfunded', { feePayer: keeperKeypair.publicKey.toBase58(), note: 'automatic payouts are off until this wallet has a little SOL; filled orders can be collected from the Account page' });
+            keeperUnfundedNoted = true;
+        } else if (lamports != null && lamports < 0.05e9) {
+            log.error('keeper', 'LOW_BALANCE', { sol: (lamports / 1e9).toFixed(4), feePayer: keeperKeypair.publicKey.toBase58() });
+        }
     } catch (err) {
         log.warn('health', 'failed', { msg: err.message });
     }

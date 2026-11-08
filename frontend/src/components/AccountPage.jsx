@@ -41,12 +41,21 @@ export default function AccountPage() {
 
   useEffect(() => { setPageTitle(`Account · ${BRAND}`); }, []);
 
+  // Bumped after anything that changes the account (withdraw, close), to reload what depends on it.
+  const [changed, setChanged] = useState(0);
   const load = useCallback(() => {
     if (!wallet) return setPayout(null);
     setError(null);
     getJSON(`/api/payout-accounts?wallet=${wallet}`).then(setPayout).catch(err => setError(err.message));
   }, [wallet]);
-  useEffect(load, [load]);
+  useEffect(load, [load, changed]);
+  // The first visit reads the wallet's history from the chain in the background, which is where
+  // payout accounts set up through another SpotTerminal server come from: reload until it's done.
+  useEffect(() => {
+    if (!payout?.scan || payout.scan.done) return undefined;
+    const t = setTimeout(load, 4000);
+    return () => clearTimeout(t);
+  }, [payout, load]);
 
   // Fill proceeds and leftovers waiting in Manifest markets (in the wallet's seat there).
   const [funds, setFunds] = useState(null);
@@ -55,15 +64,6 @@ export default function AccountPage() {
     getJSON(`/api/account/funds?wallet=${wallet}`).then(r => setFunds(r.markets)).catch(() => setFunds([]));
   }, [wallet]);
   useEffect(loadFunds, [loadFunds]);
-
-  // Payout accounts the chain shows this wallet set up through another SpotTerminal server.
-  const [chainPayout, setChainPayout] = useState([]);
-  useEffect(() => {
-    if (!wallet) return setChainPayout([]);
-    let live = true;
-    getJSON(`/api/history?wallet=${wallet}`).then(r => live && setChainPayout((r.payoutAccounts || []).filter(a => !a.knownHere))).catch(() => {});
-    return () => { live = false; };
-  }, [wallet, payout]);
 
   async function moveFunds(m) {
     setBusy(`funds:${m.market}`);
@@ -81,7 +81,7 @@ export default function AccountPage() {
     } finally {
       setBusy(null);
       loadFunds();
-      load();
+      setChanged(c => c + 1);
     }
   }
 
@@ -105,10 +105,12 @@ export default function AccountPage() {
       }
     } finally {
       setBusy(null);
-      load();
+      loadFunds();
+      setChanged(c => c + 1);
     }
   }
 
+  const scanning = payout?.scan && !payout.scan.done;
   const count = payout?.accounts.length || 0;
   const openOrders = payout?.openOrders || 0;
   const ordersText = `${openOrders} open order${openOrders === 1 ? '' : 's'}`;
@@ -128,7 +130,7 @@ export default function AccountPage() {
     }).catch(() => live && setTax(null));
     load();
     return () => { live = false; clearTimeout(timer); };
-  }, [wallet, payout]);
+  }, [wallet, changed]);
 
   return (
     <div className="app account-page">
@@ -189,7 +191,7 @@ export default function AccountPage() {
             </p>
           )}
 
-          {wallet && (payout?.accounts.length > 0 || chainPayout.length > 0) && (
+          {wallet && payout?.accounts.length > 0 && (
             <>
               <h3>Payout accounts</h3>
               <p className="muted small">
@@ -198,18 +200,15 @@ export default function AccountPage() {
                 (below).
               </p>
               <ul className="payout-list">
-                {chainPayout.map(a => (
+                {payout.accounts.map(a => (
                   <li key={a.address}>
                     <a href={explorerAccount(a.address)} target="_blank" rel="noreferrer" className="num">{shortAddr(a.address)}</a>
                     <span className="num">{sol(a.lamports / 1e9)}</span>
-                    <span className="muted" title="Found on the blockchain: set up through another SpotTerminal server, which may be using it for an order's payout.">found on-chain</span>
-                  </li>
-                ))}
-                {(payout?.accounts || []).map(a => (
-                  <li key={a.address}>
-                    <a href={explorerAccount(a.address)} target="_blank" rel="noreferrer" className="num">{shortAddr(a.address)}</a>
-                    <span className="num">{sol(a.lamports / 1e9)}</span>
-                    <span className="muted">{a.inUse ? 'backing an open order' : 'free'}</span>
+                    {a.onChain ? (
+                      <span className="muted" title="Found on the blockchain: set up through another SpotTerminal server, which may be using it for an order's payout.">found on-chain</span>
+                    ) : (
+                      <span className="muted">{a.inUse ? 'backing an open order' : 'free'}</span>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -350,7 +349,9 @@ export default function AccountPage() {
 
           {wallet && payout && (
             count === 0 && openOrders === 0 ? (
-              <div className="account-row">Nothing to close. Your account is set up with your first order.</div>
+              scanning
+                ? <div className="account-row"><span className="spinner" /> Looking for your account on the blockchain…</div>
+                : <div className="account-row">Nothing to close. Your account is set up with your first order.</div>
             ) : (
               <>
                 {openOrders > 0 && (

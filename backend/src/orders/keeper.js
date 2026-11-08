@@ -20,7 +20,7 @@ export function loadKeeperKeypair() {
         const kp = Keypair.generate();
         fs.mkdirSync(config.dataDir, { recursive: true });
         fs.writeFileSync(config.keeperKeypairPath, JSON.stringify([...kp.secretKey]), { mode: 0o600 });
-        log.warn('keeper', 'generated_keypair', { feePayer: kp.publicKey.toBase58(), note: 'fund it with a little SOL' });
+        log.info('keeper', 'generated_keypair', { feePayer: kp.publicKey.toBase58(), note: 'send it a little SOL to turn on automatic payouts' });
         return kp;
     }
     return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(config.keeperKeypairPath, 'utf8'))));

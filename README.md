@@ -127,7 +127,6 @@ Solflare, Backpack, ...) to trade.
 ```bash
 git clone https://github.com/liqflow-llc/spot-terminal.git
 cd spot-terminal
-cp .env.example .env    # optional: every setting has a working default
 ```
 
 Start the API (keep this terminal open):
@@ -148,7 +147,10 @@ npm run dev             # open http://localhost:5180
 
 That's it. Notes:
 
-- **RPC.** No key needed: with an empty `.env` the backend uses a shared free-plan
+- **Settings are optional.** There's no `.env` to create: every setting has a working default.
+  To change one, copy [`.env.example`](.env.example) to `.env` and edit it (`.env` is never
+  committed, so your keys stay on your machine and `git pull` never conflicts with it).
+- **RPC.** No key needed: without a `.env` the backend uses a shared free-plan
   [Helius](https://helius.dev) key that ships with the project. Everyone running the app without
   their own key shares its monthly credits, so if it runs out (or is rotated), put your own free
   key from [dashboard.helius.dev](https://dashboard.helius.dev) in `.env` as `HELIUS_API_KEY`. Any

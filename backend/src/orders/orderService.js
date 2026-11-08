@@ -218,7 +218,17 @@ function parseMint(mint) {
 }
 
 export class OrderService {
-    constructor({ markets, store, keeperPubkey, referencePrice = null, jupiter = null, usdPrices = null, ledger = null, resolveMarket = null }) {
+    constructor({ markets, store, keeperPubkey, referencePrice = null, jupiter = null, usdPrices = null, ledger = null, resolveMarket = null, chainAccount = null }) {
+        // async (walletPk) => { nonces: [address], orders: [open order this server has no record
+        // of], scan }: what the wallet's own transactions show (server.js, history/chainHistory.js).
+        this.chainAccount = async (walletPk) => {
+            if (!chainAccount) return { nonces: [], orders: [], scan: null };
+            try {
+                return await chainAccount(walletPk);
+            } catch {
+                return { nonces: [], orders: [], scan: null };
+            }
+        };
         this.ledger = ledger; // what moved into / out of SpotTerminal, for tax exports (orders/ledger.js)
         this.markets = markets;
         // Swaps also work on a pair with no Manifest market ("<baseMint>-<quoteMint>").
@@ -718,7 +728,7 @@ export class OrderService {
                 signature = await this.send(txs[i], pending);
                 this.recordLanded({ kind: 'cancelAll', wallet: pending.wallet, sig: signature, ...pending.cancelLedger[i] });
                 for (const orderId of pending.cancels[i]) this.store.update(orderId, { status: 'cancelled', cancelSignature: signature });
-                cancelled += pending.cancels[i].length;
+                cancelled += pending.cancelCounts?.[i] ?? pending.cancels[i].length;
             }
             if (closeTx) {
                 const busy = this.store.noncesInUse(pending.wallet);
@@ -1166,7 +1176,12 @@ export class OrderService {
     /** A wallet's payout accounts and how much of their deposit can be refunded right now. */
     async payoutAccounts(wallet) {
         const walletPk = parseWallet(wallet);
-        const addrs = this.store.noncesFor(walletPk.toBase58());
+        const ours = this.store.noncesFor(walletPk.toBase58());
+        // What the chain shows beyond this server's records: payout accounts the wallet set up and
+        // orders it placed through another SpotTerminal server (or before this one lost its data).
+        const chain = await this.chainAccount(walletPk);
+        const known = new Set(ours);
+        const addrs = [...new Set([...ours, ...chain.nonces])];
         const infos = addrs.length ? await connection.getMultipleAccountsInfo(addrs.map(a => new PublicKey(a)), 'confirmed') : [];
         const inUse = this.noncesSpokenFor(walletPk.toBase58());
         const accounts = [];
@@ -1174,15 +1189,17 @@ export class OrderService {
             const info = infos[i];
             if (!info || !info.owner.equals(SystemProgram.programId) || info.data.length !== NONCE_ACCOUNT_LENGTH) return;
             if (!NonceAccount.fromAccountData(info.data).authorizedPubkey.equals(walletPk)) return;
-            accounts.push({ address, lamports: info.lamports, inUse: inUse.has(address) });
+            accounts.push({ address, lamports: info.lamports, inUse: inUse.has(address), onChain: !known.has(address) });
         });
-        const free = accounts.filter(a => !a.inUse);
+        // Accounts found only on-chain may back an order another server pays out: never "free" here.
+        const free = accounts.filter(a => !a.inUse && !a.onChain);
         return {
             accounts,
             totalSol: accounts.reduce((s, a) => s + a.lamports, 0) / 1e9,
-            openOrders: this.store.forWallet(walletPk.toBase58()).filter(o => o.status === 'open' || o.status === 'expired').length,
+            openOrders: this.store.forWallet(walletPk.toBase58()).filter(o => o.status === 'open' || o.status === 'expired').length + chain.orders.length,
+            scan: chain.scan,
             refundableSol: free.reduce((s, a) => s + a.lamports, 0) / 1e9,
-            lockedSol: accounts.filter(a => a.inUse).reduce((s, a) => s + a.lamports, 0) / 1e9,
+            lockedSol: accounts.filter(a => a.inUse || a.onChain).reduce((s, a) => s + a.lamports, 0) / 1e9,
             inUseCount: accounts.length - free.length,
         };
     }
@@ -1194,7 +1211,7 @@ export class OrderService {
     async prepareClosePayout({ wallet }) {
         const walletPk = parseWallet(wallet);
         const { accounts, inUseCount } = await this.payoutAccounts(wallet);
-        const closable = accounts.filter(a => !a.inUse);
+        const closable = accounts.filter(a => !a.inUse && !a.onChain);
         if (!closable.length) {
             throw new UserError(inUseCount
                 ? 'Your payout accounts are backing open orders. Cancel or wait for those orders to fill, then try again.'
@@ -1441,13 +1458,13 @@ export class OrderService {
      * One transaction cancelling `batch` (orders on one market, at most CANCEL_ALL_MAX), voiding
      * their payouts and withdrawing everything they free to the wallet.
      */
-    async buildCancelTx(walletPk, market, batch, { blockhash, lastValidBlockHeight }) {
+    async buildCancelTx(walletPk, market, batch, { blockhash, lastValidBlockHeight }, chainSeqs = []) {
         const ctx = await this.loadContext(walletPk, market);
         const onBook = new Set(this.markets.allOrders(market).map(o => o.sequenceNumber.toString()));
         const tx = new Transaction({ feePayer: walletPk, blockhash, lastValidBlockHeight });
         tx.add(...priorityIxs(CANCEL_CU + 25_000 * batch.length));
         for (const o of batch) tx.add(SystemProgram.nonceAdvance({ noncePubkey: new PublicKey(o.nonce), authorizedPubkey: walletPk }));
-        const seqs = batch.map(o => o.sequenceNumber).filter(seq => seq && onBook.has(seq));
+        const seqs = [...batch.map(o => o.sequenceNumber).filter(seq => seq && onBook.has(seq)), ...chainSeqs.filter(seq => onBook.has(seq))];
         if (seqs.length) {
             tx.add(batchUpdateIx({
                 trader: walletPk, market, baseMint: ctx.baseMint, quoteMint: ctx.quoteMint,
@@ -1456,7 +1473,10 @@ export class OrderService {
             }));
         }
         const withdrawn = await this.appendWithdrawAll(tx, walletPk, ctx, { excludeOrderId: new Set(batch.map(o => o.id)) });
-        return { tx, moves: withdrawMoves(ctx, withdrawn), fills: batch.map(o => ({ orderId: o.id, filledAtoms: this.filledSoFar(o) })) };
+        // A market only holding orders this server never recorded: their deposits aren't in its
+        // ledger, so neither is the withdrawal (the tax export takes it from the chain).
+        const moves = batch.length ? withdrawMoves(ctx, withdrawn) : [];
+        return { tx, moves, fills: batch.map(o => ({ orderId: o.id, filledAtoms: this.filledSoFar(o) })) };
     }
 
     /**
@@ -1472,20 +1492,30 @@ export class OrderService {
             throw new UserError('An order is being placed or paid out right now. Please try again in a moment.');
         }
         const open = mine.filter(o => o.status === 'open' || o.status === 'expired');
-        const byMarket = new Map();
-        for (const o of open) byMarket.set(o.market, [...(byMarket.get(o.market) || []), o]);
-        for (const list of byMarket.values()) {
-            if (list.length > CANCEL_ALL_MAX) {
-                throw new UserError(`You have ${list.length} open orders on one market. Use Cancel all on that market first, then close your account.`);
+        // Orders the chain shows that this server has no record of are cancelled too: closing the
+        // payout accounts voids their payouts, wherever those are held.
+        const chainOpen = (await this.chainAccount(walletPk)).orders;
+        const byMarket = new Map(); // market -> { ours: [order], chain: [sequence number] }
+        const entry = (m) => byMarket.get(m) || byMarket.set(m, { ours: [], chain: [] }).get(m);
+        for (const o of open) entry(o.market).ours.push(o);
+        for (const o of chainOpen) entry(o.market).chain.push(o.sequenceNumber);
+        for (const { ours, chain } of byMarket.values()) {
+            const n = ours.length + chain.length;
+            if (n > CANCEL_ALL_MAX) {
+                throw new UserError(`You have ${n} open orders on one market. Use Cancel all on that market first, then close your account.`);
             }
         }
+        const total = open.length + chainOpen.length;
         const { accounts } = await this.payoutAccounts(w);
-        if (!accounts.length && !open.length) throw new UserError('There is nothing to close.');
+        if (!accounts.length && !total) throw new UserError('There is nothing to close.');
 
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
         const cancels = [];
-        for (const [market, list] of byMarket) {
-            cancels.push({ ...(await this.buildCancelTx(walletPk, market, list, { blockhash, lastValidBlockHeight })), orderIds: list.map(o => o.id), market });
+        for (const [market, { ours, chain }] of byMarket) {
+            cancels.push({
+                ...(await this.buildCancelTx(walletPk, market, ours, { blockhash, lastValidBlockHeight }, chain)),
+                orderIds: ours.map(o => o.id), count: ours.length + chain.length, market,
+            });
         }
         const txs = cancels.map(c => c.tx);
         let refundLamports = 0;
@@ -1504,7 +1534,7 @@ export class OrderService {
         this.pending.set(id, {
             kind: 'closeAccount', wallet: w, createdAt: Date.now(),
             messages: txs.map(t => t.serializeMessage()), blockhash, lastValidBlockHeight,
-            cancels: cancels.map(c => c.orderIds), nonceAddresses: accounts.map(a => a.address), refundLamports,
+            cancels: cancels.map(c => c.orderIds), cancelCounts: cancels.map(c => c.count), nonceAddresses: accounts.map(a => a.address), refundLamports,
             cancelLedger: cancels.map(c => ({ moves: c.moves, fills: c.fills, market: c.market })),
         });
         return {
@@ -1512,8 +1542,8 @@ export class OrderService {
             transactions: txs.map(t => t.serialize({ requireAllSignatures: false }).toString('base64')),
             summary: {
                 title: 'Close account',
-                detail: `${open.length ? `Cancels ${open.length} open order${open.length === 1 ? '' : 's'} and returns their funds. ` : ''}Refunds ${(refundLamports / 1e9).toFixed(5)} SOL rent.`,
-                cancelled: open.length, refundSol: refundLamports / 1e9,
+                detail: `${total ? `Cancels ${total} open order${total === 1 ? '' : 's'} and returns their funds. ` : ''}Refunds ${(refundLamports / 1e9).toFixed(5)} SOL rent.`,
+                cancelled: total, refundSol: refundLamports / 1e9,
             },
         };
     }
