@@ -10,6 +10,7 @@ import { getJSON, postJSON } from '../services/api';
 import { explorerTx, isUserRejection, signAndSubmit } from '../services/signing';
 import { formatAmount, formatPrice, priceDecimals, toInputString } from '../utils/format';
 import '../legal/Legal.css';
+import { REPO_URL } from '../brand';
 import './OrderForm.css';
 import { reportError } from '../services/report';
 import TokenRiskNote from './TokenRiskNote.jsx';
@@ -322,6 +323,10 @@ export default function OrderForm({ market, book, account, pickedPrice, onPlaced
         <span>By trading you agree to the</span>
         <Link to="/terms">Terms</Link>
         <Link to="/privacy">Privacy</Link>
+      </p>
+      <p className="legal-links oss-note">
+        <span>Fully open source, and you can run it yourself.</span>
+        <a href={REPO_URL} target="_blank" rel="noopener noreferrer">GitHub</a>
       </p>
 
       {riskPrompt && (

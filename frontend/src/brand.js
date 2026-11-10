@@ -3,3 +3,5 @@
 // data-domain and the share image (backend/scripts/make-og-image.mjs).
 export const BRAND = 'SpotTerminal';
 export const SITE = 'spotterminal.com';
+// The public source repo, linked from the order form and Account page footers.
+export const REPO_URL = 'https://github.com/liqflow-llc/spot-terminal';

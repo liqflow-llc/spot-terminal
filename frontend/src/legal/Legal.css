@@ -18,3 +18,5 @@
 .legal-links { display: flex; gap: 12px; font-size: 11px; color: var(--muted); }
 .legal-links a { color: var(--muted); }
 .legal-links a:hover { color: var(--text-2); }
+.legal-links.oss-note { display: block; margin-top: 6px; line-height: 1.5; }
+.legal-links.oss-note a { margin-left: 4px; }

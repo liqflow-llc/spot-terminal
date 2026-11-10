@@ -15,7 +15,7 @@ import { formatAmount } from '../utils/format';
 import { usePushNotifications } from '../hooks/usePushNotifications';
 import { useTheme } from '../theme';
 import { setPageTitle } from '../pageTitle';
-import { BRAND } from '../brand';
+import { BRAND, REPO_URL } from '../brand';
 
 const sol = (n) => `${Number(n || 0).toFixed(5)} SOL`;
 const explorerAccount = (address) => `https://solscan.io/account/${address}`;
@@ -390,6 +390,11 @@ export default function AccountPage() {
           <Link to="/terms">Terms of Service</Link>
           <Link to="/privacy">Privacy Policy</Link>
           <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>
+          <a href={REPO_URL} target="_blank" rel="noopener noreferrer">GitHub</a>
+        </p>
+        <p className="legal-links oss-note">
+          {BRAND} is completely open source. You can read every line, or run it on your own computer
+          with one command: see the README on GitHub.
         </p>
       </main>
     </div>
